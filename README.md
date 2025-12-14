@@ -8,18 +8,18 @@ Turn your Android tablet into a second screen for your Linux desktop with hardwa
 - **Low-latency streaming** (~30-40ms on local WiFi)
 - **Full stylus support** with pressure and tilt sensitivity
 - **Multi-touch support** for touch input
-- **X11 screen mirroring**
+- **X11 and Wayland support** (native PipeWire capture on Wayland)
 
 ## Requirements
 
 ### Server (Linux)
 - Intel Arc B580 GPU (or other VA-API capable GPU)
-- X11 display server
+- X11 or Wayland display server
 - Arch Linux (or compatible distro)
 
 ### Client (Android)
 - Android 10+ with AV1 hardware decoding support
-- Tested on Samsung Galaxy Tab S10+
+- Tested on Samsung Tab S10 Ultra
 
 ## Quick Start
 
@@ -65,11 +65,17 @@ Or use the convenience script:
 Usage: stream_tablet_server [options]
 Options:
   -d, --display DISPLAY   X11 display (default: :0)
+  -c, --capture BACKEND   Capture backend: auto, x11, pipewire (default: auto)
   -f, --fps FPS           Capture FPS (default: 60)
   -b, --bitrate BPS       Bitrate in bps (default: 15000000)
   -p, --port PORT         Control port (default: 9500)
   -v, --verbose           Enable debug logging
   -h, --help              Show this help
+
+Capture backends:
+  auto      Auto-detect (PipeWire on Wayland, X11 on X11)
+  x11       X11/XCB screen capture
+  pipewire  PipeWire/Portal capture (native Wayland)
 ```
 
 ## Network Ports
@@ -87,8 +93,10 @@ Make sure these ports are open in your firewall.
 │   Linux Server      │                    │   Android Client    │
 │   (Intel Arc B580)  │                    │   (Tablet)          │
 ├─────────────────────┤                    ├─────────────────────┤
-│ X11 Capture (XCB)   │───Video (AV1)────→ │ MediaCodec Decoder  │
-│ VA-API Encoder      │   UDP              │ SurfaceView         │
+│ X11 Capture (XCB)   │                    │                     │
+│   - or -            │───Video (AV1)────→ │ MediaCodec Decoder  │
+│ PipeWire (Wayland)  │   UDP              │ SurfaceView         │
+│ VA-API Encoder      │                    │                     │
 │                     │                    │                     │
 │ uinput Injector     │←──Input ───────────│ Stylus/Touch Handler│
 │ (stylus pressure)   │   TCP              │                     │
