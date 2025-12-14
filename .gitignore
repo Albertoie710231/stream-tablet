@@ -1,0 +1,36 @@
+# Build directories
+build/
+cmake-build-*/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Compiled files
+*.o
+*.a
+*.so
+*.dylib
+
+# Certificates (sensitive)
+certs/*.pem
+certs/*.key
+certs/*.crt
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/app/.cxx/
+android/local.properties
+android/*.apk
+android/*.aab
+*.keystore
+*.jks
+
+# OS files
+.DS_Store
+Thumbs.db

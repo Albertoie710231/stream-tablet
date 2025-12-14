@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">StreamTablet</string>
+    <string name="connect">Connect</string>
+    <string name="disconnect">Disconnect</string>
+    <string name="server_address">Server Address</string>
+    <string name="port">Port</string>
+    <string name="connecting">Connecting...</string>
+    <string name="connected">Connected</string>
+    <string name="disconnected">Disconnected</string>
+    <string name="error_connection">Connection failed</string>
+    <string name="maintain_aspect_ratio">Maintain aspect ratio</string>
+</resources>

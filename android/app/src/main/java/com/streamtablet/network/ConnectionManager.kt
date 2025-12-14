@@ -1,0 +1,388 @@
+package com.streamtablet.network
+
+import android.util.Log
+import java.io.DataInputStream
+import java.io.DataOutputStream
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.InetAddress
+import java.net.Socket
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.util.concurrent.LinkedBlockingQueue
+
+class ConnectionManager {
+    companion object {
+        private const val TAG = "ConnectionManager"
+        private const val VIDEO_MAGIC: Short = 0x5354  // "ST"
+    }
+
+    data class ServerConfig(
+        val width: Int,
+        val height: Int,
+        val videoPort: Int,
+        val inputPort: Int
+    )
+
+    data class VideoFrame(
+        val data: ByteArray,
+        val timestamp: Long,
+        val isKeyframe: Boolean
+    )
+
+    private var controlSocket: Socket? = null
+    private var controlIn: DataInputStream? = null
+    private var controlOut: DataOutputStream? = null
+
+    private var videoSocket: DatagramSocket? = null
+    private var inputSocket: Socket? = null
+    private var inputOut: DataOutputStream? = null
+
+    private var serverAddress: String = ""
+    private var serverPort: Int = 9500
+    private var serverConfig: ServerConfig? = null
+
+    private val inputQueue = LinkedBlockingQueue<InputEvent>(100)
+    private var inputThread: Thread? = null
+
+    // Frame reassembly
+    private var currentFrameNumber: Int = -1
+    private var frameFragments = mutableMapOf<Int, ByteArray>()
+    private var expectedFragments = 0
+    private var frameIsKeyframe = false
+    private var frameStartTime: Long = 0
+    private var waitingForKeyframe = false
+    private var lastKeyframeRequest: Long = 0
+
+    // Callback for keyframe requests
+    var onKeyframeNeeded: (() -> Unit)? = null
+
+    fun connect(address: String, port: Int) {
+        serverAddress = address
+        serverPort = port
+
+        Log.i(TAG, "Connecting to $address:$port")
+
+        // Create video socket FIRST so we know our local port
+        videoSocket = DatagramSocket()
+        videoSocket?.soTimeout = 1000
+        // Increase receive buffer for large keyframes (2MB)
+        videoSocket?.receiveBufferSize = 2 * 1024 * 1024
+        Log.i(TAG, "Video socket created on local port ${videoSocket?.localPort}, buffer=${videoSocket?.receiveBufferSize}")
+
+        // Connect control channel
+        controlSocket = Socket(address, port)
+        controlIn = DataInputStream(controlSocket!!.getInputStream())
+        controlOut = DataOutputStream(controlSocket!!.getOutputStream())
+
+        // Send config request (now includes our video port)
+        sendConfigRequest()
+
+        // Receive server config
+        val config = receiveConfig()
+        serverConfig = config
+
+        Log.i(TAG, "Server config: ${config.width}x${config.height}, video=${config.videoPort}, input=${config.inputPort}")
+
+        // Send initial packet to server to punch through NAT
+        val serverAddr = InetAddress.getByName(address)
+        val initPacket = DatagramPacket(ByteArray(1), 1, serverAddr, config.videoPort)
+        videoSocket?.send(initPacket)
+
+        Log.i(TAG, "Connected successfully")
+    }
+
+    fun connectInput() {
+        val config = serverConfig ?: return
+
+        try {
+            inputSocket = Socket(serverAddress, config.inputPort)
+            inputOut = DataOutputStream(inputSocket!!.getOutputStream())
+
+            // Start input sending thread
+            inputThread = Thread({ inputSendLoop() }, "InputSender").apply { start() }
+
+            Log.i(TAG, "Input channel connected")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to connect input channel", e)
+        }
+    }
+
+    private fun sendConfigRequest() {
+        // Config request: [length:2][type:1][width:2][height:2][videoPort:2][inputPort:2]
+        val buffer = ByteBuffer.allocate(11).order(ByteOrder.BIG_ENDIAN)
+        buffer.putShort(9)  // length
+        buffer.put(0x03)    // MSG_CONFIG_REQUEST
+
+        // Request our tablet resolution (landscape)
+        buffer.putShort(2800)  // width (landscape)
+        buffer.putShort(1752)  // height (landscape)
+        buffer.putShort(videoSocket?.localPort?.toShort() ?: 0)  // our video port
+        buffer.putShort(0)     // input port (server will tell us)
+
+        controlOut?.write(buffer.array())
+        controlOut?.flush()
+    }
+
+    private fun receiveConfig(): ServerConfig {
+        // Read message header
+        val lengthHigh = controlIn!!.readByte().toInt() and 0xFF
+        val lengthLow = controlIn!!.readByte().toInt() and 0xFF
+        val length = (lengthHigh shl 8) or lengthLow
+
+        val type = controlIn!!.readByte()
+        if (type != 0x04.toByte()) {  // MSG_CONFIG_RESPONSE
+            throw RuntimeException("Unexpected message type: $type")
+        }
+
+        val data = ByteArray(length - 1)
+        controlIn!!.readFully(data)
+
+        val buffer = ByteBuffer.wrap(data).order(ByteOrder.BIG_ENDIAN)
+        val width = buffer.short.toInt() and 0xFFFF
+        val height = buffer.short.toInt() and 0xFFFF
+        val videoPort = buffer.short.toInt() and 0xFFFF
+        val inputPort = buffer.short.toInt() and 0xFFFF
+
+        return ServerConfig(width, height, videoPort, inputPort)
+    }
+
+    fun getConfig(): ServerConfig {
+        return serverConfig ?: throw RuntimeException("Not connected")
+    }
+
+    private var packetCount = 0
+
+    fun receiveVideoFrame(): VideoFrame? {
+        val socket = videoSocket ?: return null
+
+        try {
+            val buffer = ByteArray(1500)
+            val packet = DatagramPacket(buffer, buffer.size)
+            socket.receive(packet)
+
+            packetCount++
+
+            return parseVideoPacket(packet.data, packet.length)
+        } catch (e: java.net.SocketTimeoutException) {
+            if (packetCount == 0) {
+                Log.w(TAG, "No packets received yet (timeout)")
+            }
+            return null
+        } catch (e: Exception) {
+            Log.e(TAG, "Error receiving packet", e)
+            return null
+        }
+    }
+
+    private fun parseVideoPacket(data: ByteArray, length: Int): VideoFrame? {
+        if (length < 16) return null  // 16-byte header
+
+        val buffer = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
+
+        val magic = buffer.short
+        if (magic != VIDEO_MAGIC) {
+            Log.w(TAG, "Invalid magic: $magic")
+            return null
+        }
+
+        @Suppress("UNUSED_VARIABLE")
+        val sequence = buffer.short.toInt() and 0xFFFF
+        val frameNumber = buffer.short.toInt() and 0xFFFF
+        val flags = buffer.get().toInt() and 0xFF
+        buffer.get()  // reserved
+        val fragmentIdx = buffer.short.toInt() and 0xFFFF  // Now 16-bit
+        val fragmentCount = buffer.short.toInt() and 0xFFFF  // Now 16-bit, total count
+        val payloadLen = buffer.short.toInt() and 0xFFFF
+        buffer.short  // reserved2
+
+        val isKeyframe = (flags and 0x01) != 0
+        // isStart and isEnd reserved for future use (packet loss detection)
+        @Suppress("UNUSED_VARIABLE")
+        val isStart = (flags and 0x02) != 0
+        @Suppress("UNUSED_VARIABLE")
+        val isEnd = (flags and 0x04) != 0
+
+        // Extract payload (starts after 16-byte header)
+        val payload = ByteArray(payloadLen)
+        System.arraycopy(data, 16, payload, 0, payloadLen)
+
+        // Handle frame reassembly
+        if (frameNumber != currentFrameNumber) {
+            // Check if previous frame was incomplete (packet loss detected)
+            if (currentFrameNumber >= 0 && frameFragments.size > 0 && frameFragments.size < expectedFragments) {
+                Log.w(TAG, "Frame $currentFrameNumber incomplete: ${frameFragments.size}/$expectedFragments fragments, packet loss detected")
+                // Stream is now corrupted until next keyframe
+                if (!waitingForKeyframe) {
+                    waitingForKeyframe = true
+                    requestKeyframeThrottled()
+                }
+            }
+
+            // New frame, reset
+            currentFrameNumber = frameNumber
+            frameFragments.clear()
+            expectedFragments = fragmentCount
+            frameIsKeyframe = isKeyframe
+            frameStartTime = System.currentTimeMillis()
+
+            // If this is a keyframe, we can stop waiting
+            if (isKeyframe) {
+                waitingForKeyframe = false
+            }
+        }
+
+        // If waiting for keyframe and this isn't one, skip this frame's packets
+        if (waitingForKeyframe && !frameIsKeyframe) {
+            return null
+        }
+
+        frameFragments[fragmentIdx] = payload
+
+        // Check if frame is complete
+        if (frameFragments.size == expectedFragments) {
+            // Verify all fragments are present (0 to expectedFragments-1)
+            for (i in 0 until expectedFragments) {
+                if (!frameFragments.containsKey(i)) {
+                    Log.w(TAG, "Frame $frameNumber missing fragment $i")
+                    frameFragments.clear()
+                    if (!waitingForKeyframe) {
+                        waitingForKeyframe = true
+                        requestKeyframeThrottled()
+                    }
+                    return null
+                }
+            }
+
+            // Reassemble frame
+            val totalSize = frameFragments.values.sumOf { it.size }
+            val frameData = ByteArray(totalSize)
+            var offset = 0
+            for (i in 0 until expectedFragments) {
+                val fragment = frameFragments[i]!!
+                System.arraycopy(fragment, 0, frameData, offset, fragment.size)
+                offset += fragment.size
+            }
+
+            frameFragments.clear()
+            return VideoFrame(frameData, System.currentTimeMillis() * 1000, frameIsKeyframe)
+        }
+
+        return null
+    }
+
+    private fun requestKeyframeThrottled() {
+        val now = System.currentTimeMillis()
+        // Don't request more than once per 200ms
+        if (now - lastKeyframeRequest > 200) {
+            lastKeyframeRequest = now
+            Log.i(TAG, "Requesting keyframe due to packet loss")
+            onKeyframeNeeded?.invoke() ?: requestKeyframe()
+        }
+    }
+
+    fun sendInput(event: InputEvent) {
+        inputQueue.offer(event)
+    }
+
+    private fun inputSendLoop() {
+        val buffer = ByteBuffer.allocate(28).order(ByteOrder.LITTLE_ENDIAN)
+
+        while (inputSocket?.isConnected == true) {
+            try {
+                val event = inputQueue.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS) ?: continue
+
+                buffer.clear()
+                buffer.put(event.type.ordinal.toByte())
+                buffer.put(event.pointerId)
+                buffer.putFloat(event.x)
+                buffer.putFloat(event.y)
+                buffer.putFloat(event.pressure)
+                buffer.putFloat(event.tiltX)
+                buffer.putFloat(event.tiltY)
+                buffer.putShort(event.buttons)
+                buffer.putInt(event.timestamp)
+
+                inputOut?.write(buffer.array())
+                inputOut?.flush()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error sending input", e)
+                break
+            }
+        }
+    }
+
+    fun requestKeyframe() {
+        try {
+            // Send keyframe request
+            val buffer = ByteBuffer.allocate(3).order(ByteOrder.BIG_ENDIAN)
+            buffer.putShort(1)   // length
+            buffer.put(0x05)     // MSG_KEYFRAME_REQUEST
+
+            controlOut?.write(buffer.array())
+            controlOut?.flush()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error requesting keyframe", e)
+        }
+    }
+
+    fun disconnect() {
+        Log.i(TAG, "Disconnecting")
+
+        inputThread?.interrupt()
+
+        try {
+            // Send disconnect message
+            val buffer = ByteBuffer.allocate(3).order(ByteOrder.BIG_ENDIAN)
+            buffer.putShort(1)
+            buffer.put(0x08)  // MSG_DISCONNECT
+            controlOut?.write(buffer.array())
+            controlOut?.flush()
+        } catch (e: Exception) {
+            // Ignore
+        }
+
+        inputOut?.close()
+        inputSocket?.close()
+        videoSocket?.close()
+        controlIn?.close()
+        controlOut?.close()
+        controlSocket?.close()
+
+        inputSocket = null
+        videoSocket = null
+        controlSocket = null
+        serverConfig = null
+
+        // Reset frame reassembly state
+        currentFrameNumber = -1
+        frameFragments.clear()
+        expectedFragments = 0
+        waitingForKeyframe = false
+        lastKeyframeRequest = 0
+    }
+}
+
+enum class InputEventType {
+    TOUCH_DOWN,
+    TOUCH_MOVE,
+    TOUCH_UP,
+    STYLUS_DOWN,
+    STYLUS_MOVE,
+    STYLUS_UP,
+    STYLUS_HOVER,
+    KEY_DOWN,
+    KEY_UP
+}
+
+data class InputEvent(
+    val type: InputEventType,
+    val pointerId: Byte,
+    val x: Float,
+    val y: Float,
+    val pressure: Float,
+    val tiltX: Float,
+    val tiltY: Float,
+    val buttons: Short,
+    val timestamp: Int
+)
