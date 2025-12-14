@@ -5,6 +5,12 @@
 
 namespace stream_tablet {
 
+enum class QualityMode {
+    LOW_LATENCY,   // CBR, optimized for latency
+    BALANCED,      // CBR, balanced quality/latency
+    HIGH_QUALITY   // CQP, optimized for quality
+};
+
 struct ServerConfig {
     // Display
     std::string display = ":0";
@@ -13,6 +19,8 @@ struct ServerConfig {
     // Encoding
     int bitrate = 15000000;  // 15 Mbps
     int gop_size = 60;       // Keyframe every 1 second at 60fps
+    QualityMode quality_mode = QualityMode::BALANCED;
+    int cqp = 20;            // Quality level for CQP mode (lower = better, 1-51)
 
     // Network
     uint16_t control_port = 9500;
@@ -36,6 +44,8 @@ struct EncoderConfig {
     int bitrate = 15000000;
     int gop_size = 60;
     bool low_latency = true;
+    QualityMode quality_mode = QualityMode::BALANCED;
+    int cqp = 20;  // Quality level for CQP mode (lower = better, 1-51)
 };
 
 // Protocol constants

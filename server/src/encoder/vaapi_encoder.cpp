@@ -96,23 +96,40 @@ static bool try_encoder_on_device(const char* device, const char* encoder_name,
     (*codec_ctx)->time_base = {1, config.framerate};
     (*codec_ctx)->framerate = {config.framerate, 1};
     (*codec_ctx)->pix_fmt = AV_PIX_FMT_VAAPI;
-    (*codec_ctx)->bit_rate = config.bitrate;
-    (*codec_ctx)->rc_max_rate = config.bitrate;
-    // Smaller buffer = lower latency (1 frame worth of data)
-    (*codec_ctx)->rc_buffer_size = config.bitrate / config.framerate;
     (*codec_ctx)->gop_size = config.gop_size;
     (*codec_ctx)->max_b_frames = 0;
     // Reduce frame delay
     (*codec_ctx)->delay = 0;
     (*codec_ctx)->thread_count = 1;  // Single thread for lowest latency
 
-    // Low latency options
-    av_opt_set((*codec_ctx)->priv_data, "preset", "fast", 0);
-    av_opt_set((*codec_ctx)->priv_data, "tune", "zerolatency", 0);
-    av_opt_set((*codec_ctx)->priv_data, "rc_mode", "CBR", 0);
     // VAAPI-specific low latency
     av_opt_set((*codec_ctx)->priv_data, "async_depth", "1", 0);
     av_opt_set_int((*codec_ctx)->priv_data, "idr_interval", config.gop_size, 0);
+
+    if (config.quality_mode == QualityMode::HIGH_QUALITY) {
+        // CQP mode - constant quality, variable bitrate
+        av_opt_set((*codec_ctx)->priv_data, "rc_mode", "CQP", 0);
+        // Set quality level (lower = better quality)
+        // AV1/HEVC: qp, H.264: qp
+        av_opt_set_int((*codec_ctx)->priv_data, "qp", config.cqp, 0);
+        // Also set global_quality for codecs that use it
+        (*codec_ctx)->global_quality = config.cqp;
+        // Higher bitrate cap for quality mode
+        (*codec_ctx)->bit_rate = config.bitrate;
+        (*codec_ctx)->rc_max_rate = config.bitrate * 2;
+        (*codec_ctx)->rc_buffer_size = config.bitrate;
+        // Quality preset
+        av_opt_set((*codec_ctx)->priv_data, "preset", "quality", 0);
+    } else {
+        // CBR mode - constant bitrate
+        (*codec_ctx)->bit_rate = config.bitrate;
+        (*codec_ctx)->rc_max_rate = config.bitrate;
+        // Smaller buffer = lower latency (1 frame worth of data)
+        (*codec_ctx)->rc_buffer_size = config.bitrate / config.framerate;
+        av_opt_set((*codec_ctx)->priv_data, "rc_mode", "CBR", 0);
+        av_opt_set((*codec_ctx)->priv_data, "preset", "fast", 0);
+        av_opt_set((*codec_ctx)->priv_data, "tune", "zerolatency", 0);
+    }
 
     // Create HW frames context
     *hw_frames_ctx = av_hwframe_ctx_alloc(*hw_device_ctx);

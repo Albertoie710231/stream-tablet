@@ -102,7 +102,9 @@ bool Server::init(const ServerConfig& config) {
     enc_config.framerate = config.capture_fps;
     enc_config.bitrate = config.bitrate;
     enc_config.gop_size = config.gop_size;
-    enc_config.low_latency = true;
+    enc_config.low_latency = (config.quality_mode != QualityMode::HIGH_QUALITY);
+    enc_config.quality_mode = config.quality_mode;
+    enc_config.cqp = config.cqp;
 
     m_encoder = std::make_unique<VAAPIEncoder>();
     if (!m_encoder->init(enc_config)) {
