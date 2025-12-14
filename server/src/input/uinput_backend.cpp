@@ -92,6 +92,13 @@ bool UInputBackend::init_stylus_device() {
     abs_setup.absinfo.maximum = 90;
     ioctl(m_stylus_fd, UI_ABS_SETUP, &abs_setup);
 
+    // Distance for hover/proximity detection
+    abs_setup.code = ABS_DISTANCE;
+    abs_setup.absinfo.minimum = 0;
+    abs_setup.absinfo.maximum = 255;
+    abs_setup.absinfo.resolution = 0;
+    ioctl(m_stylus_fd, UI_ABS_SETUP, &abs_setup);
+
     // Device setup
     struct uinput_setup usetup = {};
     strcpy(usetup.name, "StreamTablet Stylus");

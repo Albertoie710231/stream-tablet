@@ -98,14 +98,21 @@ static bool try_encoder_on_device(const char* device, const char* encoder_name,
     (*codec_ctx)->pix_fmt = AV_PIX_FMT_VAAPI;
     (*codec_ctx)->bit_rate = config.bitrate;
     (*codec_ctx)->rc_max_rate = config.bitrate;
-    (*codec_ctx)->rc_buffer_size = config.bitrate / 2;
+    // Smaller buffer = lower latency (1 frame worth of data)
+    (*codec_ctx)->rc_buffer_size = config.bitrate / config.framerate;
     (*codec_ctx)->gop_size = config.gop_size;
     (*codec_ctx)->max_b_frames = 0;
+    // Reduce frame delay
+    (*codec_ctx)->delay = 0;
+    (*codec_ctx)->thread_count = 1;  // Single thread for lowest latency
 
     // Low latency options
     av_opt_set((*codec_ctx)->priv_data, "preset", "fast", 0);
     av_opt_set((*codec_ctx)->priv_data, "tune", "zerolatency", 0);
     av_opt_set((*codec_ctx)->priv_data, "rc_mode", "CBR", 0);
+    // VAAPI-specific low latency
+    av_opt_set((*codec_ctx)->priv_data, "async_depth", "1", 0);
+    av_opt_set_int((*codec_ctx)->priv_data, "idr_interval", config.gop_size, 0);
 
     // Create HW frames context
     *hw_frames_ctx = av_hwframe_ctx_alloc(*hw_device_ctx);

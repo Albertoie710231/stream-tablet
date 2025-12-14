@@ -1,11 +1,14 @@
 package com.streamtablet.input
 
+import android.util.Log
 import android.view.MotionEvent
 import android.view.View
 import com.streamtablet.calibration.CalibrationManager
 import com.streamtablet.network.ConnectionManager
 import com.streamtablet.network.InputEvent
 import com.streamtablet.network.InputEventType
+
+private const val TAG = "InputHandler"
 
 class InputHandler(
     private val connectionManager: ConnectionManager,
@@ -83,17 +86,25 @@ class InputHandler(
 
     // Handle stylus hover events (when stylus is near screen but not touching)
     override fun onHover(view: View, event: MotionEvent): Boolean {
+        val toolType = event.getToolType(0)
+        Log.d(TAG, "onHover: action=${event.actionMasked}, toolType=$toolType, x=${event.x}, y=${event.y}")
+
         // Only handle stylus hover events
-        if (event.getToolType(0) != MotionEvent.TOOL_TYPE_STYLUS) {
+        if (toolType != MotionEvent.TOOL_TYPE_STYLUS) {
             return false
         }
 
         when (event.actionMasked) {
-            MotionEvent.ACTION_HOVER_ENTER,
+            MotionEvent.ACTION_HOVER_ENTER -> {
+                Log.d(TAG, "HOVER_ENTER")
+                sendEvent(view, event, 0, InputEventType.STYLUS_HOVER)
+            }
             MotionEvent.ACTION_HOVER_MOVE -> {
+                Log.d(TAG, "HOVER_MOVE")
                 sendEvent(view, event, 0, InputEventType.STYLUS_HOVER)
             }
             MotionEvent.ACTION_HOVER_EXIT -> {
+                Log.d(TAG, "HOVER_EXIT")
                 // Send stylus up when leaving hover range
                 sendEvent(view, event, 0, InputEventType.STYLUS_UP)
             }
@@ -103,15 +114,20 @@ class InputHandler(
 
     // Handle generic motion events (backup for stylus events)
     override fun onGenericMotion(view: View, event: MotionEvent): Boolean {
+        val toolType = event.getToolType(0)
+        Log.d(TAG, "onGenericMotion: action=${event.actionMasked}, toolType=$toolType, x=${event.x}, y=${event.y}")
+
         // Handle stylus hover events that might come through generic motion
-        if (event.getToolType(0) == MotionEvent.TOOL_TYPE_STYLUS) {
+        if (toolType == MotionEvent.TOOL_TYPE_STYLUS) {
             when (event.actionMasked) {
                 MotionEvent.ACTION_HOVER_ENTER,
                 MotionEvent.ACTION_HOVER_MOVE -> {
+                    Log.d(TAG, "GenericMotion HOVER")
                     sendEvent(view, event, 0, InputEventType.STYLUS_HOVER)
                     return true
                 }
                 MotionEvent.ACTION_HOVER_EXIT -> {
+                    Log.d(TAG, "GenericMotion HOVER_EXIT")
                     sendEvent(view, event, 0, InputEventType.STYLUS_UP)
                     return true
                 }

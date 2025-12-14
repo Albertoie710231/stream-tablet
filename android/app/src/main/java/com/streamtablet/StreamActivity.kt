@@ -70,10 +70,14 @@ class StreamActivity : AppCompatActivity() {
         }
         binding.videoSurface.setOnHoverListener { view, event ->
             inputHandler.onHover(view, event)
+            true  // Always consume hover events
         }
         binding.videoSurface.setOnGenericMotionListener { view, event ->
             inputHandler.onGenericMotion(view, event)
         }
+
+        // Request focus to receive hover events
+        binding.videoSurface.requestFocus()
 
         // Register surface callback BEFORE starting connection
         binding.videoSurface.holder.addCallback(object : android.view.SurfaceHolder.Callback {

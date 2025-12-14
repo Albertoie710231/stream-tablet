@@ -274,6 +274,15 @@ void Server::handle_input(const InputEvent& event) {
     int screen_x, screen_y;
     m_coord_transform.transform(event.x, event.y, screen_x, screen_y);
 
+    // Debug: log event type
+    static int hover_count = 0;
+    if (event.type == InputEventType::STYLUS_HOVER) {
+        if (hover_count++ % 30 == 0) {  // Log every 30th hover event
+            LOG_DEBUG("STYLUS_HOVER: x=%.3f y=%.3f -> screen %d,%d",
+                      event.x, event.y, screen_x, screen_y);
+        }
+    }
+
     switch (event.type) {
         case InputEventType::STYLUS_DOWN:
         case InputEventType::STYLUS_MOVE:

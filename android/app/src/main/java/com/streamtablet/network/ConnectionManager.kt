@@ -293,7 +293,7 @@ class ConnectionManager {
                 val event = inputQueue.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS) ?: continue
 
                 buffer.clear()
-                buffer.put(event.type.ordinal.toByte())
+                buffer.put(event.type.value)
                 buffer.put(event.pointerId)
                 buffer.putFloat(event.x)
                 buffer.putFloat(event.y)
@@ -363,16 +363,16 @@ class ConnectionManager {
     }
 }
 
-enum class InputEventType {
-    TOUCH_DOWN,
-    TOUCH_MOVE,
-    TOUCH_UP,
-    STYLUS_DOWN,
-    STYLUS_MOVE,
-    STYLUS_UP,
-    STYLUS_HOVER,
-    KEY_DOWN,
-    KEY_UP
+enum class InputEventType(val value: Byte) {
+    TOUCH_DOWN(0x01),
+    TOUCH_MOVE(0x02),
+    TOUCH_UP(0x03),
+    STYLUS_DOWN(0x04),
+    STYLUS_MOVE(0x05),
+    STYLUS_UP(0x06),
+    STYLUS_HOVER(0x07),
+    KEY_DOWN(0x08),
+    KEY_UP(0x09)
 }
 
 data class InputEvent(

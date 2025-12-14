@@ -10,7 +10,9 @@
         android:id="@+id/videoSurface"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:layout_gravity="center" />
+        android:layout_gravity="center"
+        android:focusable="true"
+        android:focusableInTouchMode="true" />
 
     <ProgressBar
         android:id="@+id/loadingIndicator"
