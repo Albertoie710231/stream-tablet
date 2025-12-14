@@ -2,6 +2,15 @@
 #include "util/logger.hpp"
 #include <chrono>
 #include <thread>
+#include <cstdlib>
+
+#ifdef HAVE_X11
+#include "capture/x11_capture.hpp"
+#endif
+
+#ifdef HAVE_PIPEWIRE
+#include "capture/pipewire_capture.hpp"
+#endif
 
 namespace stream_tablet {
 
@@ -11,15 +20,80 @@ Server::~Server() {
     stop();
 }
 
+bool Server::create_capture_backend(const char* display) {
+    CaptureBackendType backend = m_backend_type;
+
+    // Auto-detect if needed
+    if (backend == CaptureBackendType::AUTO) {
+        const char* wayland_display = std::getenv("WAYLAND_DISPLAY");
+        const char* x11_display = std::getenv("DISPLAY");
+
+        if (wayland_display && wayland_display[0] != '\0') {
+#ifdef HAVE_PIPEWIRE
+            LOG_INFO("Detected Wayland session, using PipeWire capture");
+            backend = CaptureBackendType::PIPEWIRE;
+#elif defined(HAVE_X11)
+            LOG_WARN("Wayland detected but PipeWire not available, falling back to X11");
+            backend = CaptureBackendType::X11;
+#else
+            LOG_ERROR("Wayland detected but no capture backend available");
+            return false;
+#endif
+        } else if (x11_display && x11_display[0] != '\0') {
+#ifdef HAVE_X11
+            LOG_INFO("Detected X11 session, using X11 capture");
+            backend = CaptureBackendType::X11;
+#elif defined(HAVE_PIPEWIRE)
+            LOG_WARN("X11 detected but X11 capture not available, trying PipeWire");
+            backend = CaptureBackendType::PIPEWIRE;
+#else
+            LOG_ERROR("X11 detected but no capture backend available");
+            return false;
+#endif
+        } else {
+            LOG_ERROR("No display session detected (WAYLAND_DISPLAY and DISPLAY not set)");
+            return false;
+        }
+    }
+
+    // Create the selected backend
+    switch (backend) {
+        case CaptureBackendType::X11:
+#ifdef HAVE_X11
+            LOG_INFO("Creating X11 capture backend");
+            m_capture = std::make_unique<X11Capture>();
+            return m_capture->init(display);
+#else
+            LOG_ERROR("X11 capture not compiled in");
+            return false;
+#endif
+
+        case CaptureBackendType::PIPEWIRE:
+#ifdef HAVE_PIPEWIRE
+            LOG_INFO("Creating PipeWire capture backend");
+            m_capture = std::make_unique<PipeWireCapture>();
+            return m_capture->init(nullptr);  // PipeWire doesn't use display string
+#else
+            LOG_ERROR("PipeWire capture not compiled in");
+            return false;
+#endif
+
+        default:
+            LOG_ERROR("Unknown capture backend type");
+            return false;
+    }
+}
+
 bool Server::init(const ServerConfig& config) {
     m_config = config;
 
-    // Initialize X11 capture
-    m_capture = std::make_unique<X11Capture>();
-    if (!m_capture->init(config.display.c_str())) {
-        LOG_ERROR("Failed to initialize X11 capture");
+    // Initialize capture backend
+    if (!create_capture_backend(config.display.c_str())) {
+        LOG_ERROR("Failed to initialize capture backend");
         return false;
     }
+
+    LOG_INFO("Using %s capture backend", m_capture->get_name());
 
     // Initialize VA-API encoder
     EncoderConfig enc_config;

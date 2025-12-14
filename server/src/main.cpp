@@ -34,19 +34,30 @@ static void print_usage(const char* prog) {
     printf("Usage: %s [options]\n", prog);
     printf("Options:\n");
     printf("  -d, --display DISPLAY   X11 display (default: :0)\n");
+    printf("  -c, --capture BACKEND   Capture backend: auto, x11, pipewire (default: auto)\n");
     printf("  -f, --fps FPS           Capture FPS, 1-120 (default: 60)\n");
     printf("  -b, --bitrate BPS       Bitrate in bps (default: auto based on fps)\n");
     printf("  -g, --gop SIZE          GOP size / keyframe interval (default: fps/2)\n");
     printf("  -p, --port PORT         Control port (default: 9500)\n");
     printf("  -v, --verbose           Enable debug logging\n");
     printf("  -h, --help              Show this help\n");
+    printf("\nCapture backends:\n");
+    printf("  auto      Auto-detect based on session (Wayland->PipeWire, X11->X11)\n");
+#ifdef HAVE_X11
+    printf("  x11       X11/XCB screen capture (works on X11 and Xwayland)\n");
+#endif
+#ifdef HAVE_PIPEWIRE
+    printf("  pipewire  PipeWire/Portal screen capture (native Wayland)\n");
+#endif
 }
 
 int main(int argc, char* argv[]) {
     ServerConfig config;
+    CaptureBackendType backend_type = CaptureBackendType::AUTO;
 
     static struct option long_options[] = {
         {"display", required_argument, 0, 'd'},
+        {"capture", required_argument, 0, 'c'},
         {"fps", required_argument, 0, 'f'},
         {"bitrate", required_argument, 0, 'b'},
         {"gop", required_argument, 0, 'g'},
@@ -60,10 +71,23 @@ int main(int argc, char* argv[]) {
     bool gop_set = false;
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "d:f:b:g:p:vh", long_options, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "d:c:f:b:g:p:vh", long_options, nullptr)) != -1) {
         switch (opt) {
             case 'd':
                 config.display = optarg;
+                break;
+            case 'c':
+                if (strcmp(optarg, "auto") == 0) {
+                    backend_type = CaptureBackendType::AUTO;
+                } else if (strcmp(optarg, "x11") == 0) {
+                    backend_type = CaptureBackendType::X11;
+                } else if (strcmp(optarg, "pipewire") == 0 || strcmp(optarg, "pw") == 0) {
+                    backend_type = CaptureBackendType::PIPEWIRE;
+                } else {
+                    fprintf(stderr, "Unknown capture backend: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return 1;
+                }
                 break;
             case 'f':
                 config.capture_fps = atoi(optarg);
@@ -121,6 +145,9 @@ int main(int argc, char* argv[]) {
     // Create and run server
     Server server;
     g_server = &server;
+
+    // Set capture backend type before init
+    server.set_capture_backend(backend_type);
 
     if (!server.init(config)) {
         LOG_ERROR("Failed to initialize server");

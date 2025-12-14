@@ -1,6 +1,6 @@
 #pragma once
 
-#include <cstdint>
+#include "capture_backend.hpp"
 #include <memory>
 #include <vector>
 #include <xcb/xcb.h>
@@ -10,39 +10,29 @@
 
 namespace stream_tablet {
 
-struct CapturedFrame {
-    uint8_t* data = nullptr;
-    int width = 0;
-    int height = 0;
-    int stride = 0;
-    uint64_t timestamp_us = 0;
-};
-
-class X11Capture {
+class X11Capture : public CaptureBackend {
 public:
     X11Capture();
-    ~X11Capture();
-
-    // Disable copy
-    X11Capture(const X11Capture&) = delete;
-    X11Capture& operator=(const X11Capture&) = delete;
+    ~X11Capture() override;
 
     // Initialize capture for the given display
-    bool init(const char* display_name = nullptr);
+    bool init(const char* display_name = nullptr) override;
 
     // Shutdown and cleanup
-    void shutdown();
+    void shutdown() override;
 
     // Capture a frame (blocking)
-    // Returns true if a new frame was captured
-    bool capture_frame(CapturedFrame& frame);
+    bool capture_frame(CapturedFrame& frame) override;
 
     // Get screen dimensions
-    int get_width() const { return m_width; }
-    int get_height() const { return m_height; }
+    int get_width() const override { return m_width; }
+    int get_height() const override { return m_height; }
 
     // Check if initialized
-    bool is_initialized() const { return m_conn != nullptr; }
+    bool is_initialized() const override { return m_conn != nullptr; }
+
+    // Backend name
+    const char* get_name() const override { return "X11"; }
 
 private:
     bool init_shm();

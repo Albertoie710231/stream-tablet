@@ -3,7 +3,7 @@
 #include <memory>
 #include <atomic>
 #include "stream_tablet/config.hpp"
-#include "capture/x11_capture.hpp"
+#include "capture/capture_backend.hpp"
 #include "encoder/vaapi_encoder.hpp"
 #include "network/control_server.hpp"
 #include "network/video_sender.hpp"
@@ -12,6 +12,13 @@
 #include "input/coord_transform.hpp"
 
 namespace stream_tablet {
+
+// Capture backend type
+enum class CaptureBackendType {
+    AUTO,       // Auto-detect based on environment
+    X11,        // Force X11 capture
+    PIPEWIRE    // Force PipeWire capture
+};
 
 class Server {
 public:
@@ -27,13 +34,18 @@ public:
     // Stop server
     void stop();
 
+    // Set preferred capture backend (call before init)
+    void set_capture_backend(CaptureBackendType type) { m_backend_type = type; }
+
 private:
+    bool create_capture_backend(const char* display);
     void capture_and_encode_loop();
     void handle_input(const InputEvent& event);
 
     ServerConfig m_config;
+    CaptureBackendType m_backend_type = CaptureBackendType::AUTO;
 
-    std::unique_ptr<X11Capture> m_capture;
+    std::unique_ptr<CaptureBackend> m_capture;
     std::unique_ptr<VAAPIEncoder> m_encoder;
     std::unique_ptr<ControlServer> m_control;
     std::unique_ptr<VideoSender> m_video_sender;
