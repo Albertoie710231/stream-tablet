@@ -2,12 +2,15 @@ package com.streamtablet.input
 
 import android.view.MotionEvent
 import android.view.View
+import com.streamtablet.calibration.CalibrationManager
 import com.streamtablet.network.ConnectionManager
 import com.streamtablet.network.InputEvent
 import com.streamtablet.network.InputEventType
 
-class InputHandler(private val connectionManager: ConnectionManager) :
-    View.OnTouchListener, View.OnHoverListener, View.OnGenericMotionListener {
+class InputHandler(
+    private val connectionManager: ConnectionManager,
+    private val calibrationManager: CalibrationManager? = null
+) : View.OnTouchListener, View.OnHoverListener, View.OnGenericMotionListener {
 
     // Map Android pointer IDs to slots 0-9
     private val pointerIdToSlot = mutableMapOf<Int, Int>()
@@ -128,8 +131,15 @@ class InputHandler(private val connectionManager: ConnectionManager) :
         }
 
         // Normalize coordinates to 0-1
-        val x = (event.getX(pointerIndex) / view.width).coerceIn(0f, 1f)
-        val y = (event.getY(pointerIndex) / view.height).coerceIn(0f, 1f)
+        var x = (event.getX(pointerIndex) / view.width).coerceIn(0f, 1f)
+        var y = (event.getY(pointerIndex) / view.height).coerceIn(0f, 1f)
+
+        // Apply calibration correction for stylus input
+        if (isStylus(event, pointerIndex) && calibrationManager != null) {
+            val corrected = calibrationManager.correct(x, y)
+            x = corrected.first
+            y = corrected.second
+        }
 
         // Get pressure (0-1)
         val pressure = event.getPressure(pointerIndex).coerceIn(0f, 1f)

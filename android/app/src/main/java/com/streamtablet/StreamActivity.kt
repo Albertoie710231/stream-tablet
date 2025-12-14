@@ -9,6 +9,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
+import com.streamtablet.calibration.CalibrationManager
 import com.streamtablet.databinding.ActivityStreamBinding
 import com.streamtablet.input.InputHandler
 import com.streamtablet.network.ConnectionManager
@@ -27,6 +28,7 @@ class StreamActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityStreamBinding
     private lateinit var connectionManager: ConnectionManager
+    private lateinit var calibrationManager: CalibrationManager
     private var decoder: AV1Decoder? = null
     private lateinit var inputHandler: InputHandler
 
@@ -58,7 +60,8 @@ class StreamActivity : AppCompatActivity() {
 
         // Initialize components
         connectionManager = ConnectionManager()
-        inputHandler = InputHandler(connectionManager)
+        calibrationManager = CalibrationManager(this)
+        inputHandler = InputHandler(connectionManager, calibrationManager)
 
         // Set up touch and hover handling for stylus support
         binding.videoSurface.setOnTouchListener { view, event ->

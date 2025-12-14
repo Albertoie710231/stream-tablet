@@ -10,4 +10,7 @@
     <string name="disconnected">Disconnected</string>
     <string name="error_connection">Connection failed</string>
     <string name="maintain_aspect_ratio">Maintain aspect ratio</string>
+    <string name="calibrate_stylus">Calibrate Stylus</string>
+    <string name="not_calibrated">Stylus not calibrated</string>
+    <string name="calibrated">Stylus calibrated</string>
 </resources>
