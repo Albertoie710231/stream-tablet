@@ -111,6 +111,13 @@ void VideoSender::set_client(const std::string& host, uint16_t port, PacingMode 
             m_burst_delay_us = 200;
             LOG_INFO("Pacing: AGGRESSIVE (threshold=2.4KB, burst=4, delay=200us)");
             break;
+        case PacingMode::KEYFRAME:
+            // Special mode: only pace keyframes, with very aggressive pacing
+            m_pacing_threshold = 0;         // Will check keyframe flag instead
+            m_packets_per_burst = 8;        // Small bursts
+            m_burst_delay_us = 100;         // 100us between bursts
+            LOG_INFO("Pacing: KEYFRAME (keyframes only, burst=8, delay=100us)");
+            break;
         default:
             m_pacing_threshold = 50000;
             m_packets_per_burst = 20;
@@ -134,9 +141,43 @@ bool VideoSender::send_frame(const uint8_t* data, size_t size,
         return false;
     }
 
+    // Log frame sizes for diagnostics
+    if (keyframe) {
+        LOG_INFO("Keyframe %u: %zu bytes (%zu packets)", frame_number, size, num_fragments);
+    }
+
+    // Determine pacing parameters based on mode and frame size
+    bool need_pacing = false;
+    int packets_per_burst = m_packets_per_burst;
+    int burst_delay_us = m_burst_delay_us;
+
+    if (m_pacing_mode == PacingMode::KEYFRAME) {
+        // Only pace keyframes, with adaptive pacing based on size
+        need_pacing = keyframe;
+        if (keyframe && size > 100000) {
+            // Adaptive pacing for large keyframes:
+            // - Small keyframes (<100KB): no pacing needed
+            // - Medium (100-300KB): light pacing (6 packets, 150us)
+            // - Large (300-500KB): moderate pacing (4 packets, 200us)
+            // - Very large (>500KB): aggressive pacing (2 packets, 300us)
+            if (size > 500000) {
+                packets_per_burst = 2;
+                burst_delay_us = 300;
+            } else if (size > 300000) {
+                packets_per_burst = 4;
+                burst_delay_us = 200;
+            } else {
+                packets_per_burst = 6;
+                burst_delay_us = 150;
+            }
+        }
+    } else if (m_pacing_mode != PacingMode::NONE) {
+        // Size-based pacing
+        need_pacing = (size > m_pacing_threshold);
+    }
+
     // Send each fragment (with pacing based on mode)
     size_t offset = 0;
-    bool need_pacing = (m_pacing_mode != PacingMode::NONE) && (size > m_pacing_threshold);
     int packets_in_burst = 0;
 
     for (size_t i = 0; i < num_fragments; i++) {
@@ -172,8 +213,8 @@ bool VideoSender::send_frame(const uint8_t* data, size_t size,
         // Pacing to prevent buffer overflow
         if (need_pacing) {
             packets_in_burst++;
-            if (packets_in_burst >= m_packets_per_burst && i < num_fragments - 1) {
-                std::this_thread::sleep_for(std::chrono::microseconds(m_burst_delay_us));
+            if (packets_in_burst >= packets_per_burst && i < num_fragments - 1) {
+                std::this_thread::sleep_for(std::chrono::microseconds(burst_delay_us));
                 packets_in_burst = 0;
             }
         }

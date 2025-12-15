@@ -38,9 +38,10 @@ public:
             ty = 1.0f - temp;
         }
 
-        // Apply inverse letterbox transform
-        float screen_x = (tx - m_offset_x) / m_scale_x;
-        float screen_y = (ty - m_offset_y) / m_scale_y;
+        // When client maintains aspect ratio, input is already normalized to video area
+        // which shows the full screen, so we just need direct 1:1 mapping
+        float screen_x = tx;
+        float screen_y = ty;
 
         // Clamp to valid range
         screen_x = std::clamp(screen_x, 0.0f, 1.0f);

@@ -6,9 +6,10 @@
 namespace stream_tablet {
 
 enum class QualityMode {
+    AUTO,          // Adaptive: CQP with dynamic adjustment based on network conditions
     LOW_LATENCY,   // CBR, optimized for latency
     BALANCED,      // CBR, balanced quality/latency
-    HIGH_QUALITY   // CQP, optimized for quality
+    HIGH_QUALITY   // CQP, optimized for quality (manual tuning)
 };
 
 struct ServerConfig {
@@ -19,8 +20,9 @@ struct ServerConfig {
     // Encoding
     int bitrate = 15000000;  // 15 Mbps
     int gop_size = 60;       // Keyframe every 1 second at 60fps
-    QualityMode quality_mode = QualityMode::BALANCED;
-    int cqp = 20;            // Quality level for CQP mode (lower = better, 1-51)
+    QualityMode quality_mode = QualityMode::AUTO;
+    int cqp = 24;            // Quality level for CQP mode (lower = better, 1-51)
+                             // AUTO mode starts at 24 and adjusts dynamically
 
     // Network
     uint16_t control_port = 9500;
@@ -35,6 +37,9 @@ struct ServerConfig {
     // Target resolution (0 = use screen resolution)
     int target_width = 0;
     int target_height = 0;
+
+    // Pacing mode for video sender (0=auto, 1=none, 2=light, 3=aggressive)
+    int pacing_mode = 0;  // AUTO by default
 };
 
 struct EncoderConfig {

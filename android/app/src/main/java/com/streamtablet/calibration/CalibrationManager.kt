@@ -2,7 +2,10 @@ package com.streamtablet.calibration
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Log
 import kotlin.math.pow
+
+private const val TAG = "CalibrationManager"
 
 /**
  * Manages stylus calibration using polynomial correction.
@@ -80,6 +83,16 @@ class CalibrationManager(context: Context) {
         // For each axis, solve the system
         coeffX = solvePolynomialFit(points, extractX = true)
         coeffY = solvePolynomialFit(points, extractX = false)
+
+        Log.i(TAG, "Calibration calculated:")
+        Log.i(TAG, "  coeffX = [${coeffX.joinToString(", ") { "%.6f".format(it) }}]")
+        Log.i(TAG, "  coeffY = [${coeffY.joinToString(", ") { "%.6f".format(it) }}]")
+
+        // Log calibration points for debugging
+        points.forEach { p ->
+            Log.d(TAG, "  Point: target(%.2f,%.2f) actual(%.2f,%.2f)".format(
+                p.targetX, p.targetY, p.actualX, p.actualY))
+        }
 
         isCalibrated = true
         saveCalibration()
@@ -250,6 +263,11 @@ class CalibrationManager(context: Context) {
                 coeffY[i] = prefs.getFloat("${KEY_COEFF_Y}_$i",
                     if (i == 2) 1f else 0f).toDouble()
             }
+            Log.i(TAG, "Calibration loaded:")
+            Log.i(TAG, "  coeffX = [${coeffX.joinToString(", ") { "%.6f".format(it) }}]")
+            Log.i(TAG, "  coeffY = [${coeffY.joinToString(", ") { "%.6f".format(it) }}]")
+        } else {
+            Log.i(TAG, "No calibration data found")
         }
     }
 

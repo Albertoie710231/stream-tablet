@@ -152,9 +152,14 @@ class InputHandler(
 
         // Apply calibration correction for stylus input
         if (isStylus(event, pointerIndex) && calibrationManager != null) {
+            val oldX = x
+            val oldY = y
             val corrected = calibrationManager.correct(x, y)
             x = corrected.first
             y = corrected.second
+            if (calibrationManager.isCalibrated) {
+                Log.d(TAG, "Calibration applied: (%.3f,%.3f) -> (%.3f,%.3f)".format(oldX, oldY, x, y))
+            }
         }
 
         // Get pressure (0-1)

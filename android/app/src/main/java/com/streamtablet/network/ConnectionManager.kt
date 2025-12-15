@@ -1,5 +1,6 @@
 package com.streamtablet.network
 
+import android.os.Process
 import android.util.Log
 import java.io.DataInputStream
 import java.io.DataOutputStream
@@ -9,12 +10,14 @@ import java.net.InetAddress
 import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.LinkedBlockingQueue
 
 class ConnectionManager {
     companion object {
         private const val TAG = "ConnectionManager"
         private const val VIDEO_MAGIC: Short = 0x5354  // "ST"
+        private const val PACKET_QUEUE_SIZE = 500  // Buffer ~500 packets
     }
 
     data class ServerConfig(
@@ -45,6 +48,15 @@ class ConnectionManager {
     private val inputQueue = LinkedBlockingQueue<InputEvent>(100)
     private var inputThread: Thread? = null
 
+    // Raw packet queue - receives packets as fast as possible
+    private data class RawPacket(val data: ByteArray, val length: Int)
+    private val packetQueue = ArrayBlockingQueue<RawPacket>(PACKET_QUEUE_SIZE)
+    private var receiverThread: Thread? = null
+    @Volatile
+    private var isReceiving = false
+    private var droppedPackets = 0
+    private var lastDropLog: Long = 0
+
     // Frame reassembly
     private var currentFrameNumber: Int = -1
     private var frameFragments = mutableMapOf<Int, ByteArray>()
@@ -66,9 +78,10 @@ class ConnectionManager {
         // Create video socket FIRST so we know our local port
         videoSocket = DatagramSocket()
         videoSocket?.soTimeout = 1000
-        // Increase receive buffer for large keyframes (2MB)
-        videoSocket?.receiveBufferSize = 2 * 1024 * 1024
-        Log.i(TAG, "Video socket created on local port ${videoSocket?.localPort}, buffer=${videoSocket?.receiveBufferSize}")
+        // Increase receive buffer for burst packet arrival (4MB to match server send buffer)
+        videoSocket?.receiveBufferSize = 4 * 1024 * 1024
+        val actualBuffer = videoSocket?.receiveBufferSize ?: 0
+        Log.i(TAG, "Video socket created on local port ${videoSocket?.localPort}, requested 4MB buffer, actual=${actualBuffer/1024}KB")
 
         // Connect control channel
         controlSocket = Socket(address, port)
@@ -89,7 +102,60 @@ class ConnectionManager {
         val initPacket = DatagramPacket(ByteArray(1), 1, serverAddr, config.videoPort)
         videoSocket?.send(initPacket)
 
+        // Start high-priority receiver thread to pull packets from kernel ASAP
+        startReceiverThread()
+
         Log.i(TAG, "Connected successfully")
+    }
+
+    private fun startReceiverThread() {
+        isReceiving = true
+        receiverThread = Thread({
+            // Set high priority to minimize packet loss
+            Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+
+            val socket = videoSocket ?: return@Thread
+            val buffer = ByteArray(1500)
+            val packet = DatagramPacket(buffer, buffer.size)
+
+            Log.i(TAG, "Receiver thread started with high priority")
+
+            while (isReceiving) {
+                try {
+                    socket.receive(packet)
+
+                    // Copy data to queue (we reuse the buffer)
+                    val dataCopy = ByteArray(packet.length)
+                    System.arraycopy(packet.data, 0, dataCopy, 0, packet.length)
+
+                    // Non-blocking offer - if queue is full, drop oldest packet
+                    if (!packetQueue.offer(RawPacket(dataCopy, packet.length))) {
+                        packetQueue.poll()  // Remove oldest
+                        packetQueue.offer(RawPacket(dataCopy, packet.length))
+                        droppedPackets++
+
+                        // Log drops periodically
+                        val now = System.currentTimeMillis()
+                        if (now - lastDropLog > 1000) {
+                            Log.w(TAG, "Packet queue full - dropped $droppedPackets packets")
+                            lastDropLog = now
+                            droppedPackets = 0
+                        }
+                    }
+                } catch (e: java.net.SocketTimeoutException) {
+                    // Normal timeout, continue
+                } catch (e: Exception) {
+                    if (isReceiving) {
+                        Log.e(TAG, "Receiver thread error", e)
+                    }
+                    break
+                }
+            }
+
+            Log.i(TAG, "Receiver thread stopped")
+        }, "UDPReceiver").apply {
+            start()
+        }
     }
 
     fun connectInput() {
@@ -154,23 +220,20 @@ class ConnectionManager {
     private var packetCount = 0
 
     fun receiveVideoFrame(): VideoFrame? {
-        val socket = videoSocket ?: return null
+        if (!isReceiving) return null
 
         try {
-            val buffer = ByteArray(1500)
-            val packet = DatagramPacket(buffer, buffer.size)
-            socket.receive(packet)
+            // Get packet from queue (blocking with timeout)
+            val rawPacket = packetQueue.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS)
+                ?: return null
 
             packetCount++
 
-            return parseVideoPacket(packet.data, packet.length)
-        } catch (e: java.net.SocketTimeoutException) {
-            if (packetCount == 0) {
-                Log.w(TAG, "No packets received yet (timeout)")
-            }
+            return parseVideoPacket(rawPacket.data, rawPacket.length)
+        } catch (e: InterruptedException) {
             return null
         } catch (e: Exception) {
-            Log.e(TAG, "Error receiving packet", e)
+            Log.e(TAG, "Error processing packet", e)
             return null
         }
     }
@@ -273,8 +336,9 @@ class ConnectionManager {
 
     private fun requestKeyframeThrottled() {
         val now = System.currentTimeMillis()
-        // Don't request more than once per 200ms
-        if (now - lastKeyframeRequest > 200) {
+        // Don't request more than once per 500ms to avoid cascade effect
+        // (keyframes are large and can cause more packet loss)
+        if (now - lastKeyframeRequest > 500) {
             lastKeyframeRequest = now
             Log.i(TAG, "Requesting keyframe due to packet loss")
             onKeyframeNeeded?.invoke() ?: requestKeyframe()
@@ -329,6 +393,10 @@ class ConnectionManager {
     fun disconnect() {
         Log.i(TAG, "Disconnecting")
 
+        // Stop receiver thread first
+        isReceiving = false
+        receiverThread?.interrupt()
+
         inputThread?.interrupt()
 
         try {
@@ -349,10 +417,20 @@ class ConnectionManager {
         controlOut?.close()
         controlSocket?.close()
 
+        // Wait for threads to finish
+        try {
+            receiverThread?.join(500)
+            inputThread?.join(500)
+        } catch (e: InterruptedException) {
+            // Ignore
+        }
+
         inputSocket = null
         videoSocket = null
         controlSocket = null
         serverConfig = null
+        receiverThread = null
+        inputThread = null
 
         // Reset frame reassembly state
         currentFrameNumber = -1
@@ -360,6 +438,7 @@ class ConnectionManager {
         expectedFragments = 0
         waitingForKeyframe = false
         lastKeyframeRequest = 0
+        packetQueue.clear()
     }
 }
 

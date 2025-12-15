@@ -54,7 +54,7 @@ public:
     }
 
 private:
-    static inline LogLevel s_level = LogLevel::INFO;
+    static inline LogLevel s_level = LogLevel::WARN;  // Quiet by default, use -v for INFO, -vv for DEBUG
 
     static void log_impl(const char* level, const char* fmt, va_list args) {
         time_t now = time(nullptr);

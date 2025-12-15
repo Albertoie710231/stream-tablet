@@ -3,6 +3,7 @@
 #include <chrono>
 #include <thread>
 #include <cstdlib>
+#include <cstdio>
 
 #ifdef HAVE_X11
 #include "capture/x11_capture.hpp"
@@ -102,7 +103,8 @@ bool Server::init(const ServerConfig& config) {
     enc_config.framerate = config.capture_fps;
     enc_config.bitrate = config.bitrate;
     enc_config.gop_size = config.gop_size;
-    enc_config.low_latency = (config.quality_mode != QualityMode::HIGH_QUALITY);
+    enc_config.low_latency = (config.quality_mode != QualityMode::HIGH_QUALITY &&
+                               config.quality_mode != QualityMode::AUTO);
     enc_config.quality_mode = config.quality_mode;
     enc_config.cqp = config.cqp;
 
@@ -175,14 +177,16 @@ void Server::run() {
         m_control->send_config(m_capture->get_width(), m_capture->get_height(),
                                m_config.video_port, m_config.input_port);
 
-        // Set video destination
-        m_video_sender->set_client(client_info.host, client_info.video_port);
+        // Set video destination with pacing mode
+        PacingMode pacing = static_cast<PacingMode>(m_config.pacing_mode);
+        m_video_sender->set_client(client_info.host, client_info.video_port, pacing);
 
         // Initialize coordinate transform
         m_coord_transform.init(m_capture->get_width(), m_capture->get_height(),
                                client_info.width, client_info.height,
                                CoordTransform::Mode::LETTERBOX, false);
 
+        printf("Client connected from %s - streaming started\n", client_info.host.c_str());
         LOG_INFO("Client connected, starting stream...");
 
         // Reset frame count for new session
@@ -229,6 +233,7 @@ void Server::run() {
         }
 
         if (m_running) {
+            printf("Client disconnected - waiting for new connection...\n");
             LOG_INFO("Client disconnected, waiting for new connection...");
             // Release all pressed buttons/tools before resetting
             if (m_uinput && m_uinput->is_initialized()) {
@@ -243,22 +248,61 @@ void Server::run() {
 }
 
 void Server::capture_and_encode_loop() {
+    static auto last_timing_log = std::chrono::high_resolution_clock::now();
+    static int capture_fail_count = 0;
+    static int encode_fail_count = 0;
+    static long total_capture_us = 0;
+    static long total_encode_us = 0;
+    static long total_send_us = 0;
+    static int timing_count = 0;
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+
     // Capture frame
     CapturedFrame frame;
     if (!m_capture->capture_frame(frame)) {
+        capture_fail_count++;
         return;
     }
+
+    auto t1 = std::chrono::high_resolution_clock::now();
 
     // Encode frame
     EncodedFrame encoded;
     if (!m_encoder->encode(frame.data, frame.width, frame.height, frame.stride,
                            frame.timestamp_us, encoded)) {
+        encode_fail_count++;
         return;  // Encoder not ready yet or error
     }
+
+    auto t2 = std::chrono::high_resolution_clock::now();
 
     // Send to client
     bool sent = m_video_sender->send_frame(encoded.data.data(), encoded.data.size(),
                                m_frame_count, encoded.is_keyframe, encoded.timestamp_us);
+
+    auto t3 = std::chrono::high_resolution_clock::now();
+
+    // Accumulate timing stats
+    total_capture_us += std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+    total_encode_us += std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+    total_send_us += std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count();
+    timing_count++;
+
+    // Log timing stats every 5 seconds
+    auto now = std::chrono::high_resolution_clock::now();
+    if (std::chrono::duration_cast<std::chrono::seconds>(now - last_timing_log).count() >= 5) {
+        if (timing_count > 0) {
+            LOG_INFO("Timing (avg): capture=%.2fms encode=%.2fms send=%.2fms | fails: capture=%d encode=%d | frames=%d",
+                     total_capture_us / 1000.0 / timing_count,
+                     total_encode_us / 1000.0 / timing_count,
+                     total_send_us / 1000.0 / timing_count,
+                     capture_fail_count, encode_fail_count, timing_count);
+        }
+        total_capture_us = total_encode_us = total_send_us = 0;
+        capture_fail_count = encode_fail_count = timing_count = 0;
+        last_timing_log = now;
+    }
 
     if (m_frame_count % 60 == 0 || encoded.is_keyframe) {
         LOG_DEBUG("Frame %d: %zu bytes, keyframe=%d, sent=%d",

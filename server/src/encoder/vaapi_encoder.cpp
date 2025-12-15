@@ -7,6 +7,7 @@ extern "C" {
 #include <libavutil/hwcontext_vaapi.h>
 #include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
+#include <libavutil/log.h>
 }
 
 #include <fcntl.h>
@@ -106,8 +107,9 @@ static bool try_encoder_on_device(const char* device, const char* encoder_name,
     av_opt_set((*codec_ctx)->priv_data, "async_depth", "1", 0);
     av_opt_set_int((*codec_ctx)->priv_data, "idr_interval", config.gop_size, 0);
 
-    if (config.quality_mode == QualityMode::HIGH_QUALITY) {
+    if (config.quality_mode == QualityMode::HIGH_QUALITY || config.quality_mode == QualityMode::AUTO) {
         // CQP mode - constant quality, variable bitrate
+        // AUTO mode uses CQP for sharp text, with dynamic adjustment handled at runtime
         av_opt_set((*codec_ctx)->priv_data, "rc_mode", "CQP", 0);
         // Set quality level (lower = better quality)
         // AV1/HEVC: qp, H.264: qp
@@ -118,8 +120,12 @@ static bool try_encoder_on_device(const char* device, const char* encoder_name,
         (*codec_ctx)->bit_rate = config.bitrate;
         (*codec_ctx)->rc_max_rate = config.bitrate * 2;
         (*codec_ctx)->rc_buffer_size = config.bitrate;
-        // Quality preset
-        av_opt_set((*codec_ctx)->priv_data, "preset", "quality", 0);
+        // Quality preset - use balanced for AUTO, quality for HIGH
+        if (config.quality_mode == QualityMode::AUTO) {
+            av_opt_set((*codec_ctx)->priv_data, "preset", "medium", 0);
+        } else {
+            av_opt_set((*codec_ctx)->priv_data, "preset", "quality", 0);
+        }
     } else {
         // CBR mode - constant bitrate
         (*codec_ctx)->bit_rate = config.bitrate;
@@ -170,6 +176,10 @@ static bool try_encoder_on_device(const char* device, const char* encoder_name,
 
 bool VAAPIEncoder::init(const EncoderConfig& config) {
     m_config = config;
+
+    // Suppress FFmpeg internal logging (only show errors in quiet mode)
+    // Users can use -v to see our logs, but FFmpeg logs are too noisy
+    av_log_set_level(AV_LOG_ERROR);
 
     // Get available render devices
     auto devices = get_render_devices();

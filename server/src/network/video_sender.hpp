@@ -12,7 +12,8 @@ enum class PacingMode {
     AUTO,       // Detect based on IP range
     NONE,       // No pacing (lowest latency, may drop packets)
     LIGHT,      // Light pacing for WiFi
-    AGGRESSIVE  // Aggressive pacing for USB tethering
+    AGGRESSIVE, // Aggressive pacing for USB tethering
+    KEYFRAME    // Only pace keyframes (best for high-bandwidth links)
 };
 
 class VideoSender {
