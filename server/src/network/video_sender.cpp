@@ -130,6 +130,8 @@ void VideoSender::set_client(const std::string& host, uint16_t port, PacingMode 
 
 bool VideoSender::send_frame(const uint8_t* data, size_t size,
                              uint32_t frame_number, bool keyframe, uint64_t timestamp_us) {
+    (void)timestamp_us;  // Reserved for future use
+
     if (!m_client_set || m_socket < 0) {
         return false;
     }
