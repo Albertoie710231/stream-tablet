@@ -24,8 +24,14 @@ class ConnectionManager {
         val width: Int,
         val height: Int,
         val videoPort: Int,
-        val inputPort: Int
-    )
+        val inputPort: Int,
+        val audioPort: Int = 0,
+        val audioSampleRate: Int = 48000,
+        val audioChannels: Int = 2,
+        val audioFrameMs: Int = 10
+    ) {
+        val audioEnabled: Boolean get() = audioPort != 0
+    }
 
     data class VideoFrame(
         val data: ByteArray,
@@ -210,7 +216,21 @@ class ConnectionManager {
         val videoPort = buffer.short.toInt() and 0xFFFF
         val inputPort = buffer.short.toInt() and 0xFFFF
 
-        return ServerConfig(width, height, videoPort, inputPort)
+        // Parse extended audio config if present (14 bytes total)
+        var audioPort = 0
+        var audioSampleRate = 48000
+        var audioChannels = 2
+        var audioFrameMs = 10
+
+        if (data.size >= 14) {
+            audioPort = buffer.short.toInt() and 0xFFFF
+            audioSampleRate = buffer.short.toInt() and 0xFFFF
+            audioChannels = buffer.get().toInt() and 0xFF
+            audioFrameMs = buffer.get().toInt() and 0xFF
+            Log.i(TAG, "Audio config: port=$audioPort, ${audioSampleRate}Hz, ${audioChannels}ch, ${audioFrameMs}ms")
+        }
+
+        return ServerConfig(width, height, videoPort, inputPort, audioPort, audioSampleRate, audioChannels, audioFrameMs)
     }
 
     fun getConfig(): ServerConfig {

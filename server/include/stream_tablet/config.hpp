@@ -28,6 +28,14 @@ struct ServerConfig {
     uint16_t control_port = 9500;
     uint16_t video_port = 9501;
     uint16_t input_port = 9502;
+    uint16_t audio_port = 9503;
+
+    // Audio
+    bool audio_enabled = true;
+    int audio_sample_rate = 48000;
+    int audio_channels = 2;
+    int audio_bitrate = 128000;    // Opus bitrate in bps
+    int audio_frame_ms = 10;       // Frame size in milliseconds
 
     // Security
     std::string cert_file = "server.crt";
@@ -54,11 +62,21 @@ struct EncoderConfig {
 };
 
 // Protocol constants
-constexpr uint16_t PROTOCOL_MAGIC = 0x5354;  // "ST"
+constexpr uint16_t PROTOCOL_MAGIC = 0x5354;  // "ST" for video
+constexpr uint16_t AUDIO_PROTOCOL_MAGIC = 0x5341;  // "SA" for audio
 constexpr uint8_t PACKET_TYPE_VIDEO = 0x01;
 constexpr uint8_t PACKET_TYPE_KEYFRAME = 0x02;
 constexpr uint8_t PACKET_TYPE_CONFIG = 0x03;
+constexpr uint8_t PACKET_TYPE_AUDIO = 0x04;
 
 constexpr size_t MAX_PACKET_PAYLOAD = 1200;  // MTU-safe
+
+// Audio stream configuration for protocol negotiation
+struct AudioStreamConfig {
+    uint16_t port = 9503;
+    uint16_t sample_rate = 48000;
+    uint8_t channels = 2;
+    uint8_t frame_ms = 10;
+};
 
 }  // namespace stream_tablet

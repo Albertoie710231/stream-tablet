@@ -37,6 +37,10 @@ public:
     // Send configuration to client
     bool send_config(int screen_width, int screen_height, int video_port, int input_port);
 
+    // Send configuration with audio info
+    bool send_config_with_audio(int screen_width, int screen_height, int video_port, int input_port,
+                                 int audio_port, int audio_sample_rate, int audio_channels, int audio_frame_ms);
+
     // Process incoming messages (call periodically)
     void process();
 

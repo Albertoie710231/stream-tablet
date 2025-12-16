@@ -193,6 +193,33 @@ bool ControlServer::send_config(int screen_width, int screen_height, int video_p
     return send_message(MSG_CONFIG_RESPONSE, data.data(), data.size());
 }
 
+bool ControlServer::send_config_with_audio(int screen_width, int screen_height, int video_port, int input_port,
+                                            int audio_port, int audio_sample_rate, int audio_channels, int audio_frame_ms) {
+    // Extended config: 14 bytes
+    // [width:2][height:2][video_port:2][input_port:2][audio_port:2][sample_rate:2][channels:1][frame_ms:1]
+    std::vector<uint8_t> data(14);
+    data[0] = (screen_width >> 8) & 0xFF;
+    data[1] = screen_width & 0xFF;
+    data[2] = (screen_height >> 8) & 0xFF;
+    data[3] = screen_height & 0xFF;
+    data[4] = (video_port >> 8) & 0xFF;
+    data[5] = video_port & 0xFF;
+    data[6] = (input_port >> 8) & 0xFF;
+    data[7] = input_port & 0xFF;
+    data[8] = (audio_port >> 8) & 0xFF;
+    data[9] = audio_port & 0xFF;
+    data[10] = (audio_sample_rate >> 8) & 0xFF;
+    data[11] = audio_sample_rate & 0xFF;
+    data[12] = static_cast<uint8_t>(audio_channels);
+    data[13] = static_cast<uint8_t>(audio_frame_ms);
+
+    LOG_INFO("Sending config with audio: %dx%d, video=%d, input=%d, audio=%d, %dHz, %dch, %dms",
+             screen_width, screen_height, video_port, input_port, audio_port,
+             audio_sample_rate, audio_channels, audio_frame_ms);
+
+    return send_message(MSG_CONFIG_RESPONSE, data.data(), data.size());
+}
+
 bool ControlServer::read_message(uint8_t& type, std::vector<uint8_t>& data) {
     // Message format: [length:2][type:1][data:length-1]
     uint8_t header[3];

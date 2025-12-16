@@ -22,6 +22,23 @@ if(HAVE_PIPEWIRE)
     list(APPEND SERVER_SOURCES src/capture/pipewire_capture.cpp)
 endif()
 
+# Audio sources (requires Opus)
+if(HAVE_OPUS)
+    list(APPEND SERVER_SOURCES
+        src/audio/audio_backend.cpp
+        src/audio/opus_encoder.cpp
+        src/network/audio_sender.cpp
+    )
+    # PipeWire audio capture (uses same lib as video capture)
+    if(HAVE_PIPEWIRE)
+        list(APPEND SERVER_SOURCES src/audio/pipewire_audio.cpp)
+    endif()
+    # PulseAudio audio capture (fallback)
+    if(HAVE_PULSE)
+        list(APPEND SERVER_SOURCES src/audio/pulseaudio_audio.cpp)
+    endif()
+endif()
+
 add_executable(stream_tablet_server ${SERVER_SOURCES})
 
 # Include directories
@@ -46,6 +63,14 @@ if(HAVE_PIPEWIRE)
     )
 endif()
 
+if(HAVE_OPUS)
+    target_include_directories(stream_tablet_server PRIVATE ${OPUS_INCLUDE_DIRS})
+endif()
+
+if(HAVE_PULSE)
+    target_include_directories(stream_tablet_server PRIVATE ${PULSE_INCLUDE_DIRS})
+endif()
+
 # Link libraries
 target_link_libraries(stream_tablet_server PRIVATE
     ${VA_LIBRARIES}
@@ -68,6 +93,14 @@ if(HAVE_PIPEWIRE)
     )
 endif()
 
+if(HAVE_OPUS)
+    target_link_libraries(stream_tablet_server PRIVATE ${OPUS_LIBRARIES})
+endif()
+
+if(HAVE_PULSE)
+    target_link_libraries(stream_tablet_server PRIVATE ${PULSE_LIBRARIES})
+endif()
+
 # Compile definitions for conditional compilation
 if(HAVE_X11)
     target_compile_definitions(stream_tablet_server PRIVATE HAVE_X11=1)
@@ -79,6 +112,18 @@ if(HAVE_PIPEWIRE)
     # which requires -fpermissive in C++ and disabling -Wpedantic
     set_source_files_properties(src/capture/pipewire_capture.cpp
         PROPERTIES COMPILE_FLAGS "-Wno-pedantic -fpermissive")
+    if(HAVE_OPUS)
+        set_source_files_properties(src/audio/pipewire_audio.cpp
+            PROPERTIES COMPILE_FLAGS "-Wno-pedantic -fpermissive")
+    endif()
+endif()
+
+if(HAVE_OPUS)
+    target_compile_definitions(stream_tablet_server PRIVATE HAVE_OPUS=1)
+endif()
+
+if(HAVE_PULSE)
+    target_compile_definitions(stream_tablet_server PRIVATE HAVE_PULSE=1)
 endif()
 
 target_compile_options(stream_tablet_server PRIVATE

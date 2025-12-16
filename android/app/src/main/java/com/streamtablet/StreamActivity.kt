@@ -9,12 +9,15 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
+import com.streamtablet.audio.AudioPlayer
+import com.streamtablet.audio.AudioReceiver
 import com.streamtablet.calibration.CalibrationManager
 import com.streamtablet.databinding.ActivityStreamBinding
 import com.streamtablet.input.InputHandler
 import com.streamtablet.network.ConnectionManager
 import com.streamtablet.video.AV1Decoder
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -31,6 +34,11 @@ class StreamActivity : AppCompatActivity() {
     private lateinit var calibrationManager: CalibrationManager
     private var decoder: AV1Decoder? = null
     private lateinit var inputHandler: InputHandler
+
+    // Audio components
+    private var audioReceiver: AudioReceiver? = null
+    private var audioPlayer: AudioPlayer? = null
+    private var audioJob: Job? = null
 
     private var serverAddress: String = ""
     private var port: Int = 9500
@@ -168,12 +176,82 @@ class StreamActivity : AppCompatActivity() {
                 connectionManager.connectInput()
             }
 
+            // Start audio if enabled
+            if (config.audioEnabled) {
+                startAudio(config)
+            }
+
             // Hide loading indicator
             runOnUiThread {
                 binding.loadingIndicator.visibility = View.GONE
             }
         } catch (e: Exception) {
             android.util.Log.e("StreamActivity", "Error starting decoder", e)
+        }
+    }
+
+    private fun startAudio(config: ConnectionManager.ServerConfig) {
+        try {
+            // Create and start audio player
+            val player = AudioPlayer(config.audioSampleRate, config.audioChannels)
+            if (!player.start()) {
+                android.util.Log.e("StreamActivity", "Failed to start audio player")
+                return
+            }
+            audioPlayer = player
+
+            // Create and start audio receiver
+            val receiver = AudioReceiver(config.audioPort)
+            receiver.start()
+            audioReceiver = receiver
+
+            // Start audio receive loop
+            audioJob = lifecycleScope.launch(Dispatchers.IO) {
+                receiveAudio()
+            }
+
+            android.util.Log.i("StreamActivity", "Audio started: ${config.audioSampleRate}Hz, ${config.audioChannels}ch, port=${config.audioPort}")
+        } catch (e: Exception) {
+            android.util.Log.e("StreamActivity", "Error starting audio", e)
+            stopAudio()
+        }
+    }
+
+    private fun stopAudio() {
+        audioJob?.cancel()
+        audioJob = null
+        audioReceiver?.stop()
+        audioReceiver = null
+        audioPlayer?.stop()
+        audioPlayer = null
+    }
+
+    private suspend fun receiveAudio() {
+        val receiver = audioReceiver ?: return
+        val player = audioPlayer ?: return
+
+        var packetCount = 0
+        var lastLogTime = System.currentTimeMillis()
+
+        while (player.isPlaying()) {
+            try {
+                val packet = receiver.getNextPacket(100)
+                if (packet != null) {
+                    player.decodeAndPlay(packet.data, packet.timestamp)
+                    packetCount++
+
+                    // Log every 5 seconds
+                    val now = System.currentTimeMillis()
+                    if (now - lastLogTime >= 5000) {
+                        android.util.Log.i("StreamActivity", "Audio: received $packetCount packets, queue=${receiver.getQueueSize()}")
+                        packetCount = 0
+                        lastLogTime = now
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("StreamActivity", "Audio receive error", e)
+                break
+            }
         }
     }
 
@@ -232,6 +310,7 @@ class StreamActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        stopAudio()
         connectionManager.disconnect()
         decoder?.stop()
     }

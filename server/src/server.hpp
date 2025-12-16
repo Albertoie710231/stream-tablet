@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <atomic>
+#include <mutex>
 #include "stream_tablet/config.hpp"
 #include "capture/capture_backend.hpp"
 #include "encoder/vaapi_encoder.hpp"
@@ -10,6 +11,12 @@
 #include "network/input_receiver.hpp"
 #include "input/uinput_backend.hpp"
 #include "input/coord_transform.hpp"
+
+#ifdef HAVE_OPUS
+#include "audio/audio_backend.hpp"
+#include "audio/opus_encoder.hpp"
+#include "network/audio_sender.hpp"
+#endif
 
 namespace stream_tablet {
 
@@ -42,6 +49,11 @@ private:
     void capture_and_encode_loop();
     void handle_input(const InputEvent& event);
 
+#ifdef HAVE_OPUS
+    bool init_audio();
+    void on_audio_frame(const AudioFrame& frame);
+#endif
+
     ServerConfig m_config;
     CaptureBackendType m_backend_type = CaptureBackendType::AUTO;
 
@@ -53,6 +65,16 @@ private:
     std::unique_ptr<UInputBackend> m_uinput;
 
     CoordTransform m_coord_transform;
+
+#ifdef HAVE_OPUS
+    // Audio components
+    std::unique_ptr<AudioBackend> m_audio_capture;
+    std::unique_ptr<OpusEncoder> m_opus_encoder;
+    std::unique_ptr<AudioSender> m_audio_sender;
+    bool m_audio_initialized = false;
+    uint32_t m_audio_sequence = 0;
+    std::mutex m_audio_mutex;
+#endif
 
     std::atomic<bool> m_running{false};
     uint32_t m_frame_count = 0;

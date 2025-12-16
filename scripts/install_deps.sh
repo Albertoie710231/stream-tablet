@@ -14,7 +14,9 @@ sudo pacman -S --needed \
     libva-utils \
     libdrm \
     openssl \
-    libuv
+    libuv \
+    opus \
+    libpulse
 
 echo ""
 echo "Dependencies installed successfully!"

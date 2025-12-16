@@ -43,6 +43,8 @@ static void print_usage(const char* prog) {
     printf("  -Q, --cqp VALUE         CQP quality value for auto/high mode, 1-51 (default: 24)\n");
     printf("  -P, --pacing MODE       Pacing mode: auto, none, light, aggressive, keyframe (default: auto)\n");
     printf("  -p, --port PORT         Control port (default: 9500)\n");
+    printf("  -A, --no-audio          Disable audio streaming\n");
+    printf("  -a, --audio-bitrate BPS Audio bitrate in bps (default: 128000)\n");
     printf("  -v, --verbose           Enable info logging (use -vv for debug)\n");
     printf("  -h, --help              Show this help\n");
     printf("\nCapture backends:\n");
@@ -78,6 +80,8 @@ int main(int argc, char* argv[]) {
         {"cqp", required_argument, 0, 'Q'},
         {"pacing", required_argument, 0, 'P'},
         {"port", required_argument, 0, 'p'},
+        {"no-audio", no_argument, 0, 'A'},
+        {"audio-bitrate", required_argument, 0, 'a'},
         {"verbose", no_argument, 0, 'v'},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
@@ -88,7 +92,7 @@ int main(int argc, char* argv[]) {
     int verbosity = 0;
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "d:c:f:b:g:q:Q:P:p:vh", long_options, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "d:c:f:b:g:q:Q:P:p:Aa:vh", long_options, nullptr)) != -1) {
         switch (opt) {
             case 'd':
                 config.display = optarg;
@@ -160,6 +164,15 @@ int main(int argc, char* argv[]) {
                 config.control_port = static_cast<uint16_t>(atoi(optarg));
                 config.video_port = config.control_port + 1;
                 config.input_port = config.control_port + 2;
+                config.audio_port = config.control_port + 3;
+                break;
+            case 'A':
+                config.audio_enabled = false;
+                break;
+            case 'a':
+                config.audio_bitrate = atoi(optarg);
+                if (config.audio_bitrate < 16000) config.audio_bitrate = 16000;
+                if (config.audio_bitrate > 510000) config.audio_bitrate = 510000;
                 break;
             case 'v':
                 verbosity++;
@@ -221,7 +234,15 @@ int main(int argc, char* argv[]) {
     if (config.quality_mode == QualityMode::HIGH_QUALITY || config.quality_mode == QualityMode::AUTO) {
         printf(" (CQP: %d)", config.cqp);
     }
-    printf(" | %d FPS | Port: %d\n", config.capture_fps, config.control_port);
+    printf(" | %d FPS | Port: %d", config.capture_fps, config.control_port);
+#ifdef HAVE_OPUS
+    if (config.audio_enabled) {
+        printf(" | Audio: %dkbps", config.audio_bitrate / 1000);
+    } else {
+        printf(" | Audio: off");
+    }
+#endif
+    printf("\n");
     printf("Waiting for connection... (use -v for detailed logs)\n");
 
     // Set up signal handlers

@@ -57,6 +57,35 @@ else()
     set(HAVE_PIPEWIRE FALSE)
 endif()
 
+# Audio support
+option(ENABLE_AUDIO "Enable audio streaming" ON)
+
+if(ENABLE_AUDIO)
+    # Opus is required for audio
+    pkg_check_modules(OPUS opus)
+    if(OPUS_FOUND)
+        message(STATUS "Audio (Opus): enabled")
+        set(HAVE_OPUS TRUE)
+    else()
+        message(STATUS "Audio (Opus): disabled (libopus not found)")
+        set(HAVE_OPUS FALSE)
+    endif()
+
+    # PulseAudio for audio capture fallback
+    pkg_check_modules(PULSE libpulse-simple)
+    if(PULSE_FOUND)
+        message(STATUS "PulseAudio audio: enabled (fallback)")
+        set(HAVE_PULSE TRUE)
+    else()
+        message(STATUS "PulseAudio audio: disabled (libpulse not found)")
+        set(HAVE_PULSE FALSE)
+    endif()
+else()
+    message(STATUS "Audio: disabled")
+    set(HAVE_OPUS FALSE)
+    set(HAVE_PULSE FALSE)
+endif()
+
 # Ensure at least one capture backend
 if(NOT HAVE_X11 AND NOT HAVE_PIPEWIRE)
     message(FATAL_ERROR "At least one capture backend (X11 or PipeWire) is required")

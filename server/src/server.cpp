@@ -155,6 +155,20 @@ bool Server::init(const ServerConfig& config) {
 
     LOG_INFO("Server initialized: %dx%d @ %d fps",
              m_capture->get_width(), m_capture->get_height(), config.capture_fps);
+
+#ifdef HAVE_OPUS
+    // Initialize audio (non-fatal if it fails)
+    if (config.audio_enabled) {
+        if (init_audio()) {
+            LOG_INFO("Audio streaming enabled");
+        } else {
+            LOG_WARN("Audio streaming disabled (initialization failed)");
+        }
+    } else {
+        LOG_INFO("Audio streaming disabled by configuration");
+    }
+#endif
+
     return true;
 }
 
@@ -173,13 +187,37 @@ void Server::run() {
             continue;
         }
 
-        // Send configuration to client
+        // Send configuration to client (with audio info if available)
+#ifdef HAVE_OPUS
+        if (m_audio_initialized) {
+            m_control->send_config_with_audio(m_capture->get_width(), m_capture->get_height(),
+                                              m_config.video_port, m_config.input_port,
+                                              m_config.audio_port, m_config.audio_sample_rate,
+                                              m_config.audio_channels, m_config.audio_frame_ms);
+        } else {
+            m_control->send_config(m_capture->get_width(), m_capture->get_height(),
+                                   m_config.video_port, m_config.input_port);
+        }
+#else
         m_control->send_config(m_capture->get_width(), m_capture->get_height(),
                                m_config.video_port, m_config.input_port);
+#endif
 
         // Set video destination with pacing mode
         PacingMode pacing = static_cast<PacingMode>(m_config.pacing_mode);
         m_video_sender->set_client(client_info.host, client_info.video_port, pacing);
+
+#ifdef HAVE_OPUS
+        // Set audio destination and start audio capture
+        if (m_audio_initialized && m_audio_sender && m_audio_capture) {
+            m_audio_sender->set_client(client_info.host, m_config.audio_port);
+            m_audio_sequence = 0;
+            m_audio_capture->start([this](const AudioFrame& frame) {
+                on_audio_frame(frame);
+            });
+            LOG_INFO("Audio capture started for client");
+        }
+#endif
 
         // Initialize coordinate transform
         m_coord_transform.init(m_capture->get_width(), m_capture->get_height(),
@@ -235,6 +273,13 @@ void Server::run() {
         if (m_running) {
             printf("Client disconnected - waiting for new connection...\n");
             LOG_INFO("Client disconnected, waiting for new connection...");
+#ifdef HAVE_OPUS
+            // Stop audio capture
+            if (m_audio_capture && m_audio_capture->is_capturing()) {
+                m_audio_capture->stop();
+                LOG_INFO("Audio capture stopped");
+            }
+#endif
             // Release all pressed buttons/tools before resetting
             if (m_uinput && m_uinput->is_initialized()) {
                 m_uinput->reset_all();
@@ -372,6 +417,98 @@ void Server::handle_input(const InputEvent& event) {
 
 void Server::stop() {
     m_running = false;
+
+#ifdef HAVE_OPUS
+    // Stop audio capture
+    if (m_audio_capture && m_audio_capture->is_capturing()) {
+        m_audio_capture->stop();
+    }
+#endif
 }
+
+#ifdef HAVE_OPUS
+bool Server::init_audio() {
+    // Create audio backend (auto-detect PipeWire/PulseAudio)
+    m_audio_capture = create_audio_backend(AudioBackendType::AUTO);
+    if (!m_audio_capture) {
+        LOG_WARN("No audio backend available");
+        return false;
+    }
+
+    // Initialize audio capture
+    AudioConfig audio_config;
+    audio_config.sample_rate = m_config.audio_sample_rate;
+    audio_config.channels = m_config.audio_channels;
+    audio_config.frame_size_ms = m_config.audio_frame_ms;
+
+    if (!m_audio_capture->init(audio_config)) {
+        LOG_WARN("Failed to initialize audio capture");
+        m_audio_capture.reset();
+        return false;
+    }
+
+    // Initialize Opus encoder
+    OpusConfig opus_config;
+    opus_config.sample_rate = m_config.audio_sample_rate;
+    opus_config.channels = m_config.audio_channels;
+    opus_config.bitrate = m_config.audio_bitrate;
+    opus_config.frame_size_ms = m_config.audio_frame_ms;
+
+    m_opus_encoder = std::make_unique<OpusEncoder>();
+    if (!m_opus_encoder->init(opus_config)) {
+        LOG_WARN("Failed to initialize Opus encoder");
+        m_audio_capture.reset();
+        return false;
+    }
+
+    // Initialize audio sender
+    m_audio_sender = std::make_unique<AudioSender>();
+    if (!m_audio_sender->init(m_config.audio_port)) {
+        LOG_WARN("Failed to initialize audio sender");
+        m_opus_encoder.reset();
+        m_audio_capture.reset();
+        return false;
+    }
+
+    m_audio_initialized = true;
+    LOG_INFO("Audio initialized: %s backend, %dHz, %d channels, %dkbps",
+             m_audio_capture->get_name(),
+             m_config.audio_sample_rate,
+             m_config.audio_channels,
+             m_config.audio_bitrate / 1000);
+    return true;
+}
+
+void Server::on_audio_frame(const AudioFrame& frame) {
+    if (!m_opus_encoder || !m_audio_sender || !m_audio_sender->has_client()) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(m_audio_mutex);
+
+    // Debug: log audio frame reception periodically
+    static int frame_count = 0;
+    static auto last_log = std::chrono::steady_clock::now();
+    frame_count++;
+
+    auto now = std::chrono::steady_clock::now();
+    if (std::chrono::duration_cast<std::chrono::seconds>(now - last_log).count() >= 5) {
+        LOG_INFO("Audio: received %d frames, %d samples/frame, sent %lu packets, %lu bytes",
+                 frame_count, frame.num_samples,
+                 m_audio_sender->get_packets_sent(),
+                 m_audio_sender->get_bytes_sent());
+        frame_count = 0;
+        last_log = now;
+    }
+
+    // Encode the audio frame (buffers internally, calls callback for each complete frame)
+    m_opus_encoder->encode(frame.samples, frame.num_samples, frame.timestamp_us,
+        [this](const EncodedAudio& encoded) {
+            // Send the encoded packet
+            m_audio_sender->send_packet(encoded.data.data(), encoded.data.size(),
+                                         m_audio_sequence++, encoded.timestamp_us);
+        });
+}
+#endif
 
 }  // namespace stream_tablet
