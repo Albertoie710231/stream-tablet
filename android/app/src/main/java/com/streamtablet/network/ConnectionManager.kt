@@ -28,7 +28,8 @@ class ConnectionManager {
         val audioPort: Int = 0,
         val audioSampleRate: Int = 48000,
         val audioChannels: Int = 2,
-        val audioFrameMs: Int = 10
+        val audioFrameMs: Int = 10,
+        val codecType: Int = 0  // 0=AV1, 1=HEVC, 2=H264
     ) {
         val audioEnabled: Boolean get() = audioPort != 0
     }
@@ -71,6 +72,13 @@ class ConnectionManager {
     private var frameStartTime: Long = 0
     private var waitingForKeyframe = false
     private var lastKeyframeRequest: Long = 0
+
+    // Statistics
+    private var packetsReceived = 0
+    private var framesCompleted = 0
+    private var framesIncomplete = 0
+    private var keyframeRequests = 0
+    private var lastStatsLog: Long = 0
 
     // Callback for keyframe requests
     var onKeyframeNeeded: (() -> Unit)? = null
@@ -221,6 +229,7 @@ class ConnectionManager {
         var audioSampleRate = 48000
         var audioChannels = 2
         var audioFrameMs = 10
+        var codecType = 0  // Default to AV1
 
         if (data.size >= 14) {
             audioPort = buffer.short.toInt() and 0xFFFF
@@ -230,7 +239,15 @@ class ConnectionManager {
             Log.i(TAG, "Audio config: port=$audioPort, ${audioSampleRate}Hz, ${audioChannels}ch, ${audioFrameMs}ms")
         }
 
-        return ServerConfig(width, height, videoPort, inputPort, audioPort, audioSampleRate, audioChannels, audioFrameMs)
+        // Parse codec type if present (15 bytes total)
+        if (data.size >= 15) {
+            codecType = buffer.get().toInt() and 0xFF
+            val codecNames = arrayOf("AV1", "HEVC", "H.264")
+            val codecName = if (codecType < codecNames.size) codecNames[codecType] else "unknown"
+            Log.i(TAG, "Codec: $codecName (type=$codecType)")
+        }
+
+        return ServerConfig(width, height, videoPort, inputPort, audioPort, audioSampleRate, audioChannels, audioFrameMs, codecType)
     }
 
     fun getConfig(): ServerConfig {
@@ -261,6 +278,7 @@ class ConnectionManager {
     private fun parseVideoPacket(data: ByteArray, length: Int): VideoFrame? {
         if (length < 16) return null  // 16-byte header
 
+        packetsReceived++
         val buffer = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
 
         val magic = buffer.short
@@ -294,7 +312,7 @@ class ConnectionManager {
         if (frameNumber != currentFrameNumber) {
             // Check if previous frame was incomplete (packet loss detected)
             if (currentFrameNumber >= 0 && frameFragments.size > 0 && frameFragments.size < expectedFragments) {
-                Log.w(TAG, "Frame $currentFrameNumber incomplete: ${frameFragments.size}/$expectedFragments fragments, packet loss detected")
+                framesIncomplete++
                 // Stream is now corrupted until next keyframe
                 if (!waitingForKeyframe) {
                     waitingForKeyframe = true
@@ -348,6 +366,19 @@ class ConnectionManager {
             }
 
             frameFragments.clear()
+            framesCompleted++
+
+            // Log stats every 5 seconds
+            val now = System.currentTimeMillis()
+            if (now - lastStatsLog >= 5000) {
+                Log.i(TAG, "Network stats: packets=$packetsReceived, frames=$framesCompleted, incomplete=$framesIncomplete, keyframeReqs=$keyframeRequests")
+                packetsReceived = 0
+                framesCompleted = 0
+                framesIncomplete = 0
+                keyframeRequests = 0
+                lastStatsLog = now
+            }
+
             return VideoFrame(frameData, System.currentTimeMillis() * 1000, frameIsKeyframe)
         }
 
@@ -360,7 +391,7 @@ class ConnectionManager {
         // (keyframes are large and can cause more packet loss)
         if (now - lastKeyframeRequest > 500) {
             lastKeyframeRequest = now
-            Log.i(TAG, "Requesting keyframe due to packet loss")
+            keyframeRequests++
             onKeyframeNeeded?.invoke() ?: requestKeyframe()
         }
     }

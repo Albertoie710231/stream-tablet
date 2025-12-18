@@ -5,19 +5,36 @@ import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.util.Log
 import android.view.Surface
-import java.nio.ByteBuffer
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
-class AV1Decoder(
+/**
+ * Video decoder that supports multiple codecs (AV1, HEVC, H.264)
+ */
+class VideoDecoder(
     private val surface: Surface,
     private val width: Int,
-    private val height: Int
+    private val height: Int,
+    private val codecType: CodecType
 ) {
     companion object {
-        private const val TAG = "AV1Decoder"
-        private const val MIME_TYPE = MediaFormat.MIMETYPE_VIDEO_AV1
+        private const val TAG = "VideoDecoder"
         private const val TIMEOUT_US = 10000L
+    }
+
+    enum class CodecType(val mimeType: String, val displayName: String) {
+        AV1(MediaFormat.MIMETYPE_VIDEO_AV1, "AV1"),
+        HEVC(MediaFormat.MIMETYPE_VIDEO_HEVC, "HEVC"),
+        H264(MediaFormat.MIMETYPE_VIDEO_AVC, "H.264");
+
+        companion object {
+            fun fromId(id: Int): CodecType = when (id) {
+                0 -> AV1
+                1 -> HEVC
+                2 -> H264
+                else -> AV1  // Default to AV1
+            }
+        }
     }
 
     private var codec: MediaCodec? = null
@@ -45,18 +62,17 @@ class AV1Decoder(
         if (isRunning) return
 
         try {
-            // Find AV1 decoder
-            val decoderName = findAV1Decoder()
+            // Find decoder for this codec type
+            val decoderName = findDecoder()
             if (decoderName == null) {
-                Log.e(TAG, "No AV1 decoder found, falling back to H.264")
-                // Could implement H.264 fallback here
-                throw RuntimeException("AV1 decoder not available")
+                Log.e(TAG, "No ${codecType.displayName} decoder found")
+                throw RuntimeException("${codecType.displayName} decoder not available")
             }
 
-            Log.i(TAG, "Using decoder: $decoderName")
+            Log.i(TAG, "Using decoder: $decoderName for ${codecType.displayName}")
 
             // Create format
-            val format = MediaFormat.createVideoFormat(MIME_TYPE, width, height).apply {
+            val format = MediaFormat.createVideoFormat(codecType.mimeType, width, height).apply {
                 // Low latency mode
                 setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
                 setInteger(MediaFormat.KEY_PRIORITY, 0)  // Realtime priority
@@ -71,31 +87,31 @@ class AV1Decoder(
             isRunning = true
             codecFailed = false
 
-            // Start decoder thread
-            decoderThread = Thread({ decoderLoop() }, "AV1DecoderInput").apply { start() }
-            outputThread = Thread({ outputLoop() }, "AV1DecoderOutput").apply { start() }
+            // Start decoder threads
+            decoderThread = Thread({ decoderLoop() }, "${codecType.displayName}DecoderInput").apply { start() }
+            outputThread = Thread({ outputLoop() }, "${codecType.displayName}DecoderOutput").apply { start() }
 
-            Log.i(TAG, "Decoder started: ${width}x${height}")
+            Log.i(TAG, "${codecType.displayName} decoder started: ${width}x${height}")
 
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start decoder", e)
+            Log.e(TAG, "Failed to start ${codecType.displayName} decoder", e)
             throw e
         }
     }
 
-    private fun findAV1Decoder(): String? {
+    private fun findDecoder(): String? {
         val codecList = MediaCodecList(MediaCodecList.ALL_CODECS)
         var softwareDecoder: String? = null
 
-        Log.i(TAG, "Searching for AV1 decoders...")
+        Log.i(TAG, "Searching for ${codecType.displayName} decoders...")
 
         for (codecInfo in codecList.codecInfos) {
             if (codecInfo.isEncoder) continue
             for (type in codecInfo.supportedTypes) {
-                if (type.equals(MIME_TYPE, ignoreCase = true)) {
+                if (type.equals(codecType.mimeType, ignoreCase = true)) {
                     val isHw = codecInfo.isHardwareAccelerated
                     val isSw = codecInfo.isSoftwareOnly
-                    Log.i(TAG, "Found AV1 decoder: ${codecInfo.name} (hw=$isHw, sw=$isSw)")
+                    Log.i(TAG, "Found ${codecType.displayName} decoder: ${codecInfo.name} (hw=$isHw, sw=$isSw)")
 
                     // Prefer hardware decoder
                     if (isHw) {
@@ -111,7 +127,7 @@ class AV1Decoder(
         }
 
         if (softwareDecoder != null) {
-            Log.w(TAG, "No hardware AV1 decoder found, using software: $softwareDecoder")
+            Log.w(TAG, "No hardware ${codecType.displayName} decoder found, using software: $softwareDecoder")
         }
         return softwareDecoder
     }
@@ -155,15 +171,13 @@ class AV1Decoder(
         // Log stats every 5 seconds
         val now = System.currentTimeMillis()
         if (now - lastStatsLog >= 5000) {
-            Log.i(TAG, "Decoder stats: submitted=$framesSubmitted, dropped=$framesDropped, decoded=$framesDecoded, queue=${frameQueue.size}")
+            Log.i(TAG, "Decoder stats (${codecType.displayName}): submitted=$framesSubmitted, dropped=$framesDropped, decoded=$framesDecoded, queue=${frameQueue.size}")
             framesSubmitted = 0
             framesDropped = 0
             framesDecoded = 0
             lastStatsLog = now
         }
     }
-
-    private var inputFrameCount = 0
 
     private fun decoderLoop() {
         while (isRunning && !codecFailed) {
@@ -189,8 +203,6 @@ class AV1Decoder(
                         frame.timestamp,
                         flags
                     )
-
-                    inputFrameCount++
                 } else {
                     Log.w(TAG, "No input buffer available")
                 }
@@ -204,8 +216,6 @@ class AV1Decoder(
         }
     }
 
-    private var outputFrameCount = 0
-
     private fun outputLoop() {
         val bufferInfo = MediaCodec.BufferInfo()
 
@@ -218,7 +228,6 @@ class AV1Decoder(
                     outputIndex >= 0 -> {
                         // Release to surface for rendering
                         codec.releaseOutputBuffer(outputIndex, true)
-                        outputFrameCount++
                         framesDecoded++
                     }
                     outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
@@ -258,6 +267,6 @@ class AV1Decoder(
         codec = null
 
         frameQueue.clear()
-        Log.i(TAG, "Decoder stopped")
+        Log.i(TAG, "${codecType.displayName} decoder stopped")
     }
 }

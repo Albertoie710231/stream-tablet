@@ -103,8 +103,11 @@ static bool try_encoder_on_device(const char* device, const char* encoder_name,
     (*codec_ctx)->delay = 0;
     (*codec_ctx)->thread_count = 1;  // Single thread for lowest latency
 
-    // VAAPI-specific low latency
-    av_opt_set((*codec_ctx)->priv_data, "async_depth", "1", 0);
+    // VAAPI-specific settings
+    // Use async_depth=4 for high FPS to allow pipelining (adds ~2-3 frames latency)
+    // Use async_depth=1 for lower FPS for minimum latency
+    int async_depth = (config.framerate > 90) ? 4 : 1;
+    av_opt_set_int((*codec_ctx)->priv_data, "async_depth", async_depth, 0);
     av_opt_set_int((*codec_ctx)->priv_data, "idr_interval", config.gop_size, 0);
 
     if (config.quality_mode == QualityMode::HIGH_QUALITY || config.quality_mode == QualityMode::AUTO) {
@@ -120,8 +123,10 @@ static bool try_encoder_on_device(const char* device, const char* encoder_name,
         (*codec_ctx)->bit_rate = config.bitrate;
         (*codec_ctx)->rc_max_rate = config.bitrate * 2;
         (*codec_ctx)->rc_buffer_size = config.bitrate;
-        // Quality preset - use balanced for AUTO, quality for HIGH
-        if (config.quality_mode == QualityMode::AUTO) {
+        // Quality preset - use fast for high FPS, medium otherwise
+        if (config.framerate > 90) {
+            av_opt_set((*codec_ctx)->priv_data, "preset", "fast", 0);
+        } else if (config.quality_mode == QualityMode::AUTO) {
             av_opt_set((*codec_ctx)->priv_data, "preset", "medium", 0);
         } else {
             av_opt_set((*codec_ctx)->priv_data, "preset", "quality", 0);
@@ -190,20 +195,52 @@ bool VAAPIEncoder::init(const EncoderConfig& config) {
 
     LOG_INFO("Found %zu render device(s), probing for encoder support...", devices.size());
 
-    // Encoders to try, in order of preference
-    const char* encoders[] = {"av1_vaapi", "hevc_vaapi", "h264_vaapi"};
-    const char* encoder_names[] = {"AV1", "HEVC", "H.264"};
+    // Define codec info
+    struct CodecInfo {
+        const char* encoder_name;
+        const char* display_name;
+        uint8_t codec_id;  // 0=AV1, 1=HEVC, 2=H264
+    };
+
+    // All available codecs
+    const CodecInfo all_codecs[] = {
+        {"av1_vaapi", "AV1", 0},
+        {"hevc_vaapi", "HEVC", 1},
+        {"h264_vaapi", "H.264", 2}
+    };
+
+    // Build list of codecs to try based on requested type
+    std::vector<CodecInfo> codecs_to_try;
+    switch (config.codec_type) {
+        case CodecType::AV1:
+            codecs_to_try.push_back(all_codecs[0]);  // AV1 only
+            break;
+        case CodecType::HEVC:
+            codecs_to_try.push_back(all_codecs[1]);  // HEVC only
+            break;
+        case CodecType::H264:
+            codecs_to_try.push_back(all_codecs[2]);  // H264 only
+            break;
+        case CodecType::AUTO:
+        default:
+            // Try all in order of preference
+            codecs_to_try.push_back(all_codecs[0]);
+            codecs_to_try.push_back(all_codecs[1]);
+            codecs_to_try.push_back(all_codecs[2]);
+            break;
+    }
 
     // Try each encoder on each device
-    for (size_t e = 0; e < sizeof(encoders) / sizeof(encoders[0]); e++) {
+    for (const auto& codec : codecs_to_try) {
         for (const auto& device : devices) {
-            LOG_INFO("Trying %s on %s...", encoder_names[e], device.c_str());
+            LOG_INFO("Trying %s on %s...", codec.display_name, device.c_str());
 
-            if (try_encoder_on_device(device.c_str(), encoders[e], config,
+            if (try_encoder_on_device(device.c_str(), codec.encoder_name, config,
                                        &m_impl->hw_device_ctx,
                                        &m_impl->hw_frames_ctx,
                                        &m_impl->codec_ctx)) {
-                LOG_INFO("Success! Using %s encoder on %s", encoder_names[e], device.c_str());
+                LOG_INFO("Success! Using %s encoder on %s", codec.display_name, device.c_str());
+                m_actual_codec = codec.codec_id;
 
                 // Allocate frames
                 m_impl->sw_frame = av_frame_alloc();
@@ -217,8 +254,8 @@ bool VAAPIEncoder::init(const EncoderConfig& config) {
 
                 m_impl->packet = av_packet_alloc();
 
-                LOG_INFO("VAAPI encoder initialized: %dx%d @ %d fps, %d bps",
-                         config.width, config.height, config.framerate, config.bitrate);
+                LOG_INFO("VAAPI encoder initialized: %dx%d @ %d fps, %d bps, codec=%s",
+                         config.width, config.height, config.framerate, config.bitrate, codec.display_name);
                 return true;
             }
         }

@@ -41,6 +41,11 @@ public:
     bool send_config_with_audio(int screen_width, int screen_height, int video_port, int input_port,
                                  int audio_port, int audio_sample_rate, int audio_channels, int audio_frame_ms);
 
+    // Send configuration with audio and codec info
+    bool send_config_full(int screen_width, int screen_height, int video_port, int input_port,
+                          int audio_port, int audio_sample_rate, int audio_channels, int audio_frame_ms,
+                          uint8_t codec_type);
+
     // Process incoming messages (call periodically)
     void process();
 

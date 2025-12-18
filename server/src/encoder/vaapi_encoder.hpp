@@ -43,6 +43,9 @@ public:
     int get_height() const { return m_config.height; }
     bool is_initialized() const { return m_impl != nullptr; }
 
+    // Get actual codec used (0=AV1, 1=HEVC, 2=H264)
+    uint8_t get_codec_type() const { return m_actual_codec; }
+
 private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;
@@ -50,6 +53,7 @@ private:
     EncoderConfig m_config;
     uint64_t m_frame_count = 0;
     bool m_force_keyframe = false;
+    uint8_t m_actual_codec = 0;  // 0=AV1, 1=HEVC, 2=H264
 };
 
 }  // namespace stream_tablet

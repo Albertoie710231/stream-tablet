@@ -106,6 +106,7 @@ bool Server::init(const ServerConfig& config) {
     enc_config.low_latency = (config.quality_mode != QualityMode::HIGH_QUALITY &&
                                config.quality_mode != QualityMode::AUTO);
     enc_config.quality_mode = config.quality_mode;
+    enc_config.codec_type = config.codec_type;
     enc_config.cqp = config.cqp;
 
     m_encoder = std::make_unique<VAAPIEncoder>();
@@ -187,21 +188,18 @@ void Server::run() {
             continue;
         }
 
-        // Send configuration to client (with audio info if available)
+        // Send configuration to client (with audio and codec info)
+        uint8_t codec_type = m_encoder->get_codec_type();
 #ifdef HAVE_OPUS
-        if (m_audio_initialized) {
-            m_control->send_config_with_audio(m_capture->get_width(), m_capture->get_height(),
-                                              m_config.video_port, m_config.input_port,
-                                              m_config.audio_port, m_config.audio_sample_rate,
-                                              m_config.audio_channels, m_config.audio_frame_ms);
-        } else {
-            m_control->send_config(m_capture->get_width(), m_capture->get_height(),
-                                   m_config.video_port, m_config.input_port);
-        }
+        int audio_port = m_audio_initialized ? m_config.audio_port : 0;
 #else
-        m_control->send_config(m_capture->get_width(), m_capture->get_height(),
-                               m_config.video_port, m_config.input_port);
+        int audio_port = 0;
 #endif
+        m_control->send_config_full(m_capture->get_width(), m_capture->get_height(),
+                                    m_config.video_port, m_config.input_port,
+                                    audio_port, m_config.audio_sample_rate,
+                                    m_config.audio_channels, m_config.audio_frame_ms,
+                                    codec_type);
 
         // Set video destination with pacing mode
         PacingMode pacing = static_cast<PacingMode>(m_config.pacing_mode);
@@ -260,14 +258,25 @@ void Server::run() {
             auto time_to_next = std::chrono::duration_cast<std::chrono::microseconds>(
                 next_frame - std::chrono::high_resolution_clock::now());
 
-            if (time_to_next.count() > 1000) {
-                // Sleep for half the remaining time to allow input processing
-                std::this_thread::sleep_for(time_to_next / 2);
-            } else if (time_to_next.count() > 100) {
-                // Very short sleep just to yield CPU
-                std::this_thread::sleep_for(std::chrono::microseconds(50));
+            // For high FPS (>90), use tighter timing to avoid sleep overshooting
+            if (m_config.capture_fps > 90) {
+                // High FPS mode: sleep less aggressively, busy-wait for last 500us
+                if (time_to_next.count() > 2000) {
+                    // Sleep for 60% of remaining time (leaving margin for oversleep)
+                    std::this_thread::sleep_for(time_to_next * 6 / 10);
+                } else if (time_to_next.count() > 500) {
+                    // Short sleep
+                    std::this_thread::sleep_for(std::chrono::microseconds(100));
+                }
+                // Busy wait for last 500us for accuracy
+            } else {
+                // Normal FPS mode: original behavior
+                if (time_to_next.count() > 1000) {
+                    std::this_thread::sleep_for(time_to_next / 2);
+                } else if (time_to_next.count() > 100) {
+                    std::this_thread::sleep_for(std::chrono::microseconds(50));
+                }
             }
-            // If less than 100us, don't sleep - busy wait for accuracy
         }
 
         if (m_running) {

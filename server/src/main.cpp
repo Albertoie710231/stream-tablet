@@ -35,6 +35,7 @@ static void print_usage(const char* prog) {
     printf("Options:\n");
     printf("  -d, --display DISPLAY   X11 display (default: :0)\n");
     printf("  -c, --capture BACKEND   Capture backend: auto, x11, pipewire (default: auto)\n");
+    printf("  -e, --encoder CODEC     Video codec: auto, av1, hevc, h264 (default: auto)\n");
     printf("  -f, --fps FPS           Capture FPS, 1-120 (default: 60)\n");
     printf("  -b, --bitrate BPS       Bitrate in bps (default: auto based on fps/quality)\n");
     printf("  -g, --gop SIZE          GOP size / keyframe interval (default: fps/2)\n");
@@ -64,6 +65,11 @@ static void print_usage(const char* prog) {
     printf("  none      No pacing - fastest, use for fast local networks\n");
     printf("  light     Light pacing - for WiFi connections\n");
     printf("  aggressive Aggressive pacing - for slow USB tethering\n");
+    printf("\nVideo codecs:\n");
+    printf("  auto      Auto-select best available (AV1 > HEVC > H.264)\n");
+    printf("  av1       AV1 - best quality/compression, slower encoding\n");
+    printf("  hevc      HEVC/H.265 - faster encoding, good quality (recommended for gaming)\n");
+    printf("  h264      H.264 - fastest encoding, widest compatibility\n");
 }
 
 int main(int argc, char* argv[]) {
@@ -73,6 +79,7 @@ int main(int argc, char* argv[]) {
     static struct option long_options[] = {
         {"display", required_argument, 0, 'd'},
         {"capture", required_argument, 0, 'c'},
+        {"encoder", required_argument, 0, 'e'},
         {"fps", required_argument, 0, 'f'},
         {"bitrate", required_argument, 0, 'b'},
         {"gop", required_argument, 0, 'g'},
@@ -92,7 +99,7 @@ int main(int argc, char* argv[]) {
     int verbosity = 0;
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "d:c:f:b:g:q:Q:P:p:Aa:vh", long_options, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "d:c:e:f:b:g:q:Q:P:p:Aa:vh", long_options, nullptr)) != -1) {
         switch (opt) {
             case 'd':
                 config.display = optarg;
@@ -106,6 +113,21 @@ int main(int argc, char* argv[]) {
                     backend_type = CaptureBackendType::PIPEWIRE;
                 } else {
                     fprintf(stderr, "Unknown capture backend: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return 1;
+                }
+                break;
+            case 'e':
+                if (strcmp(optarg, "auto") == 0) {
+                    config.codec_type = CodecType::AUTO;
+                } else if (strcmp(optarg, "av1") == 0) {
+                    config.codec_type = CodecType::AV1;
+                } else if (strcmp(optarg, "hevc") == 0 || strcmp(optarg, "h265") == 0) {
+                    config.codec_type = CodecType::HEVC;
+                } else if (strcmp(optarg, "h264") == 0 || strcmp(optarg, "avc") == 0) {
+                    config.codec_type = CodecType::H264;
+                } else {
+                    fprintf(stderr, "Unknown video codec: %s\n", optarg);
                     print_usage(argv[0]);
                     return 1;
                 }
@@ -228,9 +250,14 @@ int main(int argc, char* argv[]) {
     else if (config.quality_mode == QualityMode::BALANCED) quality_str = "balanced";
     else if (config.quality_mode == QualityMode::HIGH_QUALITY) quality_str = "high";
 
+    const char* codec_str = "auto";
+    if (config.codec_type == CodecType::AV1) codec_str = "AV1";
+    else if (config.codec_type == CodecType::HEVC) codec_str = "HEVC";
+    else if (config.codec_type == CodecType::H264) codec_str = "H.264";
+
     // Always show startup info (regardless of verbosity)
     printf("StreamTablet Server v1.0.0\n");
-    printf("Quality: %s", quality_str);
+    printf("Codec: %s | Quality: %s", codec_str, quality_str);
     if (config.quality_mode == QualityMode::HIGH_QUALITY || config.quality_mode == QualityMode::AUTO) {
         printf(" (CQP: %d)", config.cqp);
     }

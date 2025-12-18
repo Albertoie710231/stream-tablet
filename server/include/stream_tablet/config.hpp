@@ -12,6 +12,14 @@ enum class QualityMode {
     HIGH_QUALITY   // CQP, optimized for quality (manual tuning)
 };
 
+// Video codec type
+enum class CodecType {
+    AUTO,   // Auto-select (prefer AV1)
+    AV1,    // AV1 - best quality/compression, slower encoding
+    HEVC,   // HEVC/H.265 - faster encoding, good quality
+    H264    // H.264 - fastest encoding, widest compatibility
+};
+
 struct ServerConfig {
     // Display
     std::string display = ":0";
@@ -21,6 +29,7 @@ struct ServerConfig {
     int bitrate = 15000000;  // 15 Mbps
     int gop_size = 60;       // Keyframe every 1 second at 60fps
     QualityMode quality_mode = QualityMode::AUTO;
+    CodecType codec_type = CodecType::AUTO;  // Video codec to use
     int cqp = 24;            // Quality level for CQP mode (lower = better, 1-51)
                              // AUTO mode starts at 24 and adjusts dynamically
 
@@ -58,6 +67,7 @@ struct EncoderConfig {
     int gop_size = 60;
     bool low_latency = true;
     QualityMode quality_mode = QualityMode::BALANCED;
+    CodecType codec_type = CodecType::AUTO;  // Video codec to use
     int cqp = 20;  // Quality level for CQP mode (lower = better, 1-51)
 };
 

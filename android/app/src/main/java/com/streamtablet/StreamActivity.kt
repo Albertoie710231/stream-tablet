@@ -15,11 +15,12 @@ import com.streamtablet.calibration.CalibrationManager
 import com.streamtablet.databinding.ActivityStreamBinding
 import com.streamtablet.input.InputHandler
 import com.streamtablet.network.ConnectionManager
-import com.streamtablet.video.AV1Decoder
+import com.streamtablet.video.VideoDecoder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 
 class StreamActivity : AppCompatActivity() {
 
@@ -32,7 +33,7 @@ class StreamActivity : AppCompatActivity() {
     private lateinit var binding: ActivityStreamBinding
     private lateinit var connectionManager: ConnectionManager
     private lateinit var calibrationManager: CalibrationManager
-    private var decoder: AV1Decoder? = null
+    private var decoder: VideoDecoder? = null
     private lateinit var inputHandler: InputHandler
 
     // Audio components
@@ -156,7 +157,11 @@ class StreamActivity : AppCompatActivity() {
                 adjustSurfaceAspectRatio(config.width, config.height)
             }
 
-            val newDecoder = AV1Decoder(holder.surface, config.width, config.height)
+            // Select decoder based on codec type from server
+            val codecType = VideoDecoder.CodecType.fromId(config.codecType)
+            android.util.Log.i("StreamActivity", "Creating ${codecType.displayName} decoder")
+
+            val newDecoder = VideoDecoder(holder.surface, config.width, config.height, codecType)
             newDecoder.setKeyframeRequestCallback {
                 connectionManager.requestKeyframe()
             }
@@ -247,6 +252,9 @@ class StreamActivity : AppCompatActivity() {
                         packetCount = 0
                         lastLogTime = now
                     }
+                } else {
+                    // Yield to prevent busy-waiting when no packet available
+                    yield()
                 }
             } catch (e: Exception) {
                 android.util.Log.e("StreamActivity", "Audio receive error", e)
@@ -300,6 +308,9 @@ class StreamActivity : AppCompatActivity() {
                 val frame = connectionManager.receiveVideoFrame()
                 if (frame != null) {
                     decoder?.submitFrame(frame.data, frame.timestamp, frame.isKeyframe)
+                } else {
+                    // Yield to prevent busy-waiting when no frame available
+                    yield()
                 }
             } catch (e: Exception) {
                 android.util.Log.e("StreamActivity", "Video receive error", e)
