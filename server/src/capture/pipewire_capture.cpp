@@ -516,6 +516,14 @@ bool PipeWireCapture::connect_stream(uint32_t node_id) {
     uint8_t buffer[1024];
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
 
+    // Pre-declare spa_rectangle and spa_fraction values to avoid taking address of rvalues
+    struct spa_rectangle size_default = SPA_RECTANGLE(1920, 1080);
+    struct spa_rectangle size_min = SPA_RECTANGLE(1, 1);
+    struct spa_rectangle size_max = SPA_RECTANGLE(8192, 8192);
+    struct spa_fraction framerate_default = SPA_FRACTION(60, 1);
+    struct spa_fraction framerate_min = SPA_FRACTION(0, 1);
+    struct spa_fraction framerate_max = SPA_FRACTION(144, 1);
+
     const struct spa_pod* params[1];
     params[0] = static_cast<const struct spa_pod*>(spa_pod_builder_add_object(&b,
         SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
@@ -528,13 +536,13 @@ bool PipeWireCapture::connect_stream(uint32_t node_id) {
             SPA_VIDEO_FORMAT_RGBA,
             SPA_VIDEO_FORMAT_xBGR),
         SPA_FORMAT_VIDEO_size,      SPA_POD_CHOICE_RANGE_Rectangle(
-            &SPA_RECTANGLE(1920, 1080),
-            &SPA_RECTANGLE(1, 1),
-            &SPA_RECTANGLE(8192, 8192)),
+            &size_default,
+            &size_min,
+            &size_max),
         SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(
-            &SPA_FRACTION(60, 1),
-            &SPA_FRACTION(0, 1),
-            &SPA_FRACTION(144, 1))));
+            &framerate_default,
+            &framerate_min,
+            &framerate_max)));
 
     int ret = pw_stream_connect(
         m_pw_stream,

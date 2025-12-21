@@ -229,23 +229,6 @@ void Server::run() {
         m_frame_count = 0;
         m_encoder->request_keyframe();  // Start with a keyframe
 
-        // Initialize adaptive frame rate controller if supported
-        bool use_adaptive = m_config.adaptive_fps && m_capture->supports_change_detection();
-        if (use_adaptive) {
-            AdaptiveConfig adaptive_config;
-            adaptive_config.min_fps = m_config.min_fps > 0 ? m_config.min_fps : 30;
-            adaptive_config.max_fps = m_config.capture_fps;
-            adaptive_config.ramp_down_ms = 1000;
-            adaptive_config.mouse_active_ms = 500;
-            m_adaptive_controller = std::make_unique<AdaptiveFrameController>(adaptive_config);
-            LOG_INFO("Adaptive frame rate enabled: %d-%d FPS", adaptive_config.min_fps, adaptive_config.max_fps);
-        } else {
-            m_adaptive_controller.reset();
-            if (m_config.adaptive_fps) {
-                LOG_INFO("Adaptive frame rate not available (capture backend doesn't support change detection)");
-            }
-        }
-
         // Calculate frame interval
         auto frame_interval = std::chrono::microseconds(1000000 / m_config.capture_fps);
         auto next_frame = std::chrono::high_resolution_clock::now();
@@ -262,31 +245,7 @@ void Server::run() {
 
             // Check if it's time for next frame
             if (now >= next_frame) {
-                // Check for screen changes BEFORE capturing (only when we're about to capture)
-                if (m_adaptive_controller) {
-                    int damage_count = m_capture->get_pending_damage_count();
-                    if (damage_count > 0) {
-                        m_adaptive_controller->on_frame_changed();
-                    } else {
-                        m_adaptive_controller->on_frame_unchanged();
-                    }
-                }
-
                 capture_and_encode_loop();
-
-                // Acknowledge frame capture for change detection
-                if (m_adaptive_controller) {
-                    m_capture->acknowledge_frame();
-
-                    // Update frame interval based on current state
-                    frame_interval = std::chrono::microseconds(m_adaptive_controller->get_frame_interval_us());
-
-                    // Request keyframe on state transitions
-                    if (m_adaptive_controller->needs_keyframe()) {
-                        m_encoder->request_keyframe();
-                    }
-                }
-
                 next_frame += frame_interval;
 
                 // If we're behind, skip frames
@@ -299,11 +258,8 @@ void Server::run() {
             auto time_to_next = std::chrono::duration_cast<std::chrono::microseconds>(
                 next_frame - std::chrono::high_resolution_clock::now());
 
-            // Get current FPS for sleep strategy
-            int current_fps = m_adaptive_controller ? m_adaptive_controller->get_current_fps() : m_config.capture_fps;
-
             // For high FPS (>90), use tighter timing to avoid sleep overshooting
-            if (current_fps > 90) {
+            if (m_config.capture_fps > 90) {
                 // High FPS mode: sleep less aggressively, busy-wait for last 500us
                 if (time_to_next.count() > 2000) {
                     // Sleep for 60% of remaining time (leaving margin for oversleep)
