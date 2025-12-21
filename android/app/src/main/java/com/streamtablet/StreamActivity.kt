@@ -18,6 +18,7 @@ import com.streamtablet.network.ConnectionManager
 import com.streamtablet.video.VideoDecoder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
@@ -50,6 +51,13 @@ class StreamActivity : AppCompatActivity() {
     private var surfaceReady = false
     private var pendingSurface: android.view.SurfaceHolder? = null
 
+    // FPS tracking
+    private var fpsJob: Job? = null
+    @Volatile
+    private var framesReceived = 0
+    @Volatile
+    private var lastFramesDecoded = 0L
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -71,6 +79,14 @@ class StreamActivity : AppCompatActivity() {
         connectionManager = ConnectionManager()
         calibrationManager = CalibrationManager(this)
         inputHandler = InputHandler(connectionManager, calibrationManager)
+
+        // Set disconnect callback to exit stream screen when host disconnects
+        connectionManager.onDisconnected = {
+            android.util.Log.i("StreamActivity", "Host disconnected, returning to main screen")
+            runOnUiThread {
+                finish()
+            }
+        }
 
         // Set up touch and hover handling for stylus support
         binding.videoSurface.setOnTouchListener { view, event ->
@@ -186,12 +202,40 @@ class StreamActivity : AppCompatActivity() {
                 startAudio(config)
             }
 
-            // Hide loading indicator
+            // Hide loading indicator and start FPS counter
             runOnUiThread {
                 binding.loadingIndicator.visibility = View.GONE
             }
+
+            // Start FPS overlay update
+            startFpsOverlay()
+
         } catch (e: Exception) {
             android.util.Log.e("StreamActivity", "Error starting decoder", e)
+        }
+    }
+
+    private fun startFpsOverlay() {
+        fpsJob = lifecycleScope.launch {
+            var lastReceivedCount = 0
+            var lastDecodedCount = 0L
+
+            while (true) {
+                delay(1000)  // Update every second
+
+                val currentReceived = framesReceived
+                val currentDecoded = decoder?.getFramesDecoded() ?: 0L
+
+                val receivedFps = currentReceived - lastReceivedCount
+                val decodedFps = (currentDecoded - lastDecodedCount).toInt()
+
+                lastReceivedCount = currentReceived
+                lastDecodedCount = currentDecoded
+
+                runOnUiThread {
+                    binding.fpsOverlay.text = "RX: ${receivedFps} fps\nDEC: ${decodedFps} fps"
+                }
+            }
         }
     }
 
@@ -307,6 +351,7 @@ class StreamActivity : AppCompatActivity() {
             try {
                 val frame = connectionManager.receiveVideoFrame()
                 if (frame != null) {
+                    framesReceived++
                     decoder?.submitFrame(frame.data, frame.timestamp, frame.isKeyframe)
                 } else {
                     // Yield to prevent busy-waiting when no frame available
@@ -321,6 +366,7 @@ class StreamActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        fpsJob?.cancel()
         stopAudio()
         connectionManager.disconnect()
         decoder?.stop()

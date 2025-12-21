@@ -19,7 +19,8 @@ class VideoDecoder(
 ) {
     companion object {
         private const val TAG = "VideoDecoder"
-        private const val TIMEOUT_US = 10000L
+        private const val INPUT_TIMEOUT_US = 10000L   // 10ms for input
+        private const val OUTPUT_TIMEOUT_US = 5000L   // 5ms for output (balance latency vs CPU)
     }
 
     enum class CodecType(val mimeType: String, val displayName: String) {
@@ -49,8 +50,11 @@ class VideoDecoder(
     // Statistics
     private var framesSubmitted = 0
     private var framesDropped = 0
-    private var framesDecoded = 0
+    @Volatile
+    private var framesDecoded = 0L
     private var lastStatsLog = System.currentTimeMillis()
+
+    fun getFramesDecoded(): Long = framesDecoded
 
     data class FrameData(
         val data: ByteArray,
@@ -171,10 +175,10 @@ class VideoDecoder(
         // Log stats every 5 seconds
         val now = System.currentTimeMillis()
         if (now - lastStatsLog >= 5000) {
-            Log.i(TAG, "Decoder stats (${codecType.displayName}): submitted=$framesSubmitted, dropped=$framesDropped, decoded=$framesDecoded, queue=${frameQueue.size}")
+            val decoded = framesDecoded
+            Log.i(TAG, "Decoder stats (${codecType.displayName}): submitted=$framesSubmitted, dropped=$framesDropped, totalDecoded=$decoded, queue=${frameQueue.size}")
             framesSubmitted = 0
             framesDropped = 0
-            framesDecoded = 0
             lastStatsLog = now
         }
     }
@@ -185,7 +189,7 @@ class VideoDecoder(
                 val frame = frameQueue.poll(100, TimeUnit.MILLISECONDS) ?: continue
                 val codec = this.codec ?: break
 
-                val inputIndex = codec.dequeueInputBuffer(TIMEOUT_US)
+                val inputIndex = codec.dequeueInputBuffer(INPUT_TIMEOUT_US)
                 if (inputIndex >= 0) {
                     val inputBuffer = codec.getInputBuffer(inputIndex)
                     inputBuffer?.clear()
@@ -223,7 +227,7 @@ class VideoDecoder(
             val codec = this.codec ?: break
 
             try {
-                val outputIndex = codec.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
+                val outputIndex = codec.dequeueOutputBuffer(bufferInfo, OUTPUT_TIMEOUT_US)
                 when {
                     outputIndex >= 0 -> {
                         // Release to surface for rendering

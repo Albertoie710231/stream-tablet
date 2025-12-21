@@ -28,6 +28,8 @@ android/app/.cxx/
 android/local.properties
 android/*.apk
 android/*.aab
+android/*.png
+android/*.csv
 *.keystore
 *.jks
 

@@ -83,6 +83,14 @@ class ConnectionManager {
     // Callback for keyframe requests
     var onKeyframeNeeded: (() -> Unit)? = null
 
+    // Callback for disconnection (server closed connection)
+    var onDisconnected: (() -> Unit)? = null
+
+    // Control socket monitoring
+    private var controlMonitorThread: Thread? = null
+    @Volatile
+    private var isMonitoring = false
+
     fun connect(address: String, port: Int) {
         serverAddress = address
         serverPort = port
@@ -118,6 +126,9 @@ class ConnectionManager {
 
         // Start high-priority receiver thread to pull packets from kernel ASAP
         startReceiverThread()
+
+        // Start control socket monitor to detect server disconnection
+        startControlMonitorThread()
 
         Log.i(TAG, "Connected successfully")
     }
@@ -168,6 +179,101 @@ class ConnectionManager {
 
             Log.i(TAG, "Receiver thread stopped")
         }, "UDPReceiver").apply {
+            start()
+        }
+    }
+
+    private fun startControlMonitorThread() {
+        isMonitoring = true
+        controlMonitorThread = Thread({
+            Log.i(TAG, "Control monitor thread started")
+
+            val input = controlIn ?: return@Thread
+
+            while (isMonitoring) {
+                try {
+                    // Try to read from control socket - this will detect server disconnect
+                    // Set a read timeout so we can check isMonitoring periodically
+                    controlSocket?.soTimeout = 1000
+
+                    val lengthHigh = input.read()
+                    if (lengthHigh == -1) {
+                        // Server closed connection
+                        Log.i(TAG, "Server closed connection (EOF)")
+                        if (isMonitoring) {
+                            isMonitoring = false
+                            onDisconnected?.invoke()
+                        }
+                        break
+                    }
+
+                    val lengthLow = input.read()
+                    if (lengthLow == -1) {
+                        Log.i(TAG, "Server closed connection (EOF on length)")
+                        if (isMonitoring) {
+                            isMonitoring = false
+                            onDisconnected?.invoke()
+                        }
+                        break
+                    }
+
+                    val length = (lengthHigh shl 8) or lengthLow
+                    if (length > 0) {
+                        val type = input.read()
+                        if (type == -1) {
+                            Log.i(TAG, "Server closed connection (EOF on type)")
+                            if (isMonitoring) {
+                                isMonitoring = false
+                                onDisconnected?.invoke()
+                            }
+                            break
+                        }
+
+                        // Handle disconnect message from server
+                        if (type == 0x08) {  // MSG_DISCONNECT
+                            Log.i(TAG, "Received disconnect message from server")
+                            if (isMonitoring) {
+                                isMonitoring = false
+                                onDisconnected?.invoke()
+                            }
+                            break
+                        }
+
+                        // Skip remaining data for other message types
+                        if (length > 1) {
+                            val remaining = ByteArray(length - 1)
+                            input.readFully(remaining)
+                        }
+                    }
+                } catch (e: java.net.SocketTimeoutException) {
+                    // Normal timeout, continue monitoring
+                } catch (e: java.io.EOFException) {
+                    Log.i(TAG, "Server closed connection (EOFException)")
+                    if (isMonitoring) {
+                        isMonitoring = false
+                        onDisconnected?.invoke()
+                    }
+                    break
+                } catch (e: java.net.SocketException) {
+                    // Socket closed, likely due to disconnect() call
+                    if (isMonitoring) {
+                        Log.i(TAG, "Control socket closed: ${e.message}")
+                        isMonitoring = false
+                        onDisconnected?.invoke()
+                    }
+                    break
+                } catch (e: Exception) {
+                    if (isMonitoring) {
+                        Log.e(TAG, "Control monitor error", e)
+                        isMonitoring = false
+                        onDisconnected?.invoke()
+                    }
+                    break
+                }
+            }
+
+            Log.i(TAG, "Control monitor thread stopped")
+        }, "ControlMonitor").apply {
             start()
         }
     }
@@ -444,9 +550,15 @@ class ConnectionManager {
     fun disconnect() {
         Log.i(TAG, "Disconnecting")
 
-        // Stop receiver thread first
+        // Stop monitoring first to prevent disconnect callback
+        isMonitoring = false
+
+        // Stop receiver thread
         isReceiving = false
         receiverThread?.interrupt()
+
+        // Stop control monitor thread
+        controlMonitorThread?.interrupt()
 
         inputThread?.interrupt()
 
@@ -471,6 +583,7 @@ class ConnectionManager {
         // Wait for threads to finish
         try {
             receiverThread?.join(500)
+            controlMonitorThread?.join(500)
             inputThread?.join(500)
         } catch (e: InterruptedException) {
             // Ignore
@@ -481,6 +594,7 @@ class ConnectionManager {
         controlSocket = null
         serverConfig = null
         receiverThread = null
+        controlMonitorThread = null
         inputThread = null
 
         // Reset frame reassembly state
