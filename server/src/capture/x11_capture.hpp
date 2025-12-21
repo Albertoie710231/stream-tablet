@@ -3,6 +3,7 @@
 #include "capture_backend.hpp"
 #include <memory>
 #include <vector>
+#include <chrono>
 #include <xcb/xcb.h>
 #include <xcb/shm.h>
 #include <xcb/xfixes.h>
