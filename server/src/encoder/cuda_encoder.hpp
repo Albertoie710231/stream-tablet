@@ -5,10 +5,10 @@
 
 namespace stream_tablet {
 
-class VAAPIEncoder : public EncoderBackend {
+class CUDAEncoder : public EncoderBackend {
 public:
-    VAAPIEncoder();
-    ~VAAPIEncoder() override;
+    CUDAEncoder();
+    ~CUDAEncoder() override;
 
     // EncoderBackend interface
     bool init(const EncoderConfig& config) override;
@@ -21,7 +21,7 @@ public:
     int get_height() const override { return m_config.height; }
     bool is_initialized() const override { return m_impl != nullptr; }
     uint8_t get_codec_type() const override { return m_actual_codec; }
-    const char* get_name() const override { return "VAAPI"; }
+    const char* get_name() const override { return "CUDA"; }
 
 private:
     struct Impl;

@@ -2,6 +2,7 @@
 set(SERVER_SOURCES
     src/main.cpp
     src/server.cpp
+    src/encoder/encoder_factory.cpp
     src/encoder/vaapi_encoder.cpp
     src/network/control_server.cpp
     src/network/video_sender.cpp
@@ -12,6 +13,11 @@ set(SERVER_SOURCES
     src/util/event_loop.cpp
     src/util/logger.cpp
 )
+
+# Conditionally add CUDA encoder
+if(HAVE_CUDA)
+    list(APPEND SERVER_SOURCES src/encoder/cuda_encoder.cpp)
+endif()
 
 # Conditionally add capture backends
 if(HAVE_X11)
@@ -124,6 +130,13 @@ endif()
 
 if(HAVE_PULSE)
     target_compile_definitions(stream_tablet_server PRIVATE HAVE_PULSE=1)
+endif()
+
+# VAAPI is always enabled
+target_compile_definitions(stream_tablet_server PRIVATE HAVE_VAAPI=1)
+
+if(HAVE_CUDA)
+    target_compile_definitions(stream_tablet_server PRIVATE HAVE_CUDA=1)
 endif()
 
 target_compile_options(stream_tablet_server PRIVATE

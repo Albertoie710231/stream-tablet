@@ -13,6 +13,8 @@
 #include "capture/pipewire_capture.hpp"
 #endif
 
+#include "encoder/encoder_factory.hpp"
+
 namespace stream_tablet {
 
 Server::Server() = default;
@@ -109,11 +111,12 @@ bool Server::init(const ServerConfig& config) {
     enc_config.codec_type = config.codec_type;
     enc_config.cqp = config.cqp;
 
-    m_encoder = std::make_unique<VAAPIEncoder>();
-    if (!m_encoder->init(enc_config)) {
-        LOG_ERROR("Failed to initialize VA-API encoder");
+    m_encoder = create_encoder(enc_config);
+    if (!m_encoder) {
+        LOG_ERROR("Failed to initialize hardware encoder");
         return false;
     }
+    LOG_INFO("Using %s encoder backend", m_encoder->get_name());
 
     // Initialize control server
     m_control = std::make_unique<ControlServer>();

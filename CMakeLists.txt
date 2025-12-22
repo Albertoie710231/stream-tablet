@@ -14,6 +14,7 @@ endif()
 option(ENABLE_TESTS "Build tests" OFF)
 option(ENABLE_X11 "Enable X11 capture backend" ON)
 option(ENABLE_PIPEWIRE "Enable PipeWire capture backend" ON)
+option(ENABLE_CUDA "Enable CUDA/NVENC encoder" ON)
 
 # Find dependencies
 find_package(PkgConfig REQUIRED)
@@ -90,6 +91,20 @@ endif()
 if(NOT HAVE_X11 AND NOT HAVE_PIPEWIRE)
     message(FATAL_ERROR "At least one capture backend (X11 or PipeWire) is required")
 endif()
+
+# CUDA/NVENC encoder support
+# Note: NVENC support is provided by FFmpeg's libavcodec which links dynamically
+# to NVIDIA drivers. We just need to enable compilation of the CUDA encoder.
+if(ENABLE_CUDA)
+    message(STATUS "CUDA/NVENC encoder: enabled (requires NVIDIA GPU and drivers)")
+    set(HAVE_CUDA TRUE)
+else()
+    message(STATUS "CUDA/NVENC encoder: disabled")
+    set(HAVE_CUDA FALSE)
+endif()
+
+# VAAPI is always enabled (core dependency)
+set(HAVE_VAAPI TRUE)
 
 # Add server subdirectory
 add_subdirectory(server)

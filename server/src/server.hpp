@@ -5,7 +5,7 @@
 #include <mutex>
 #include "stream_tablet/config.hpp"
 #include "capture/capture_backend.hpp"
-#include "encoder/vaapi_encoder.hpp"
+#include "encoder/encoder_backend.hpp"
 #include "network/control_server.hpp"
 #include "network/video_sender.hpp"
 #include "network/input_receiver.hpp"
@@ -58,7 +58,7 @@ private:
     CaptureBackendType m_backend_type = CaptureBackendType::AUTO;
 
     std::unique_ptr<CaptureBackend> m_capture;
-    std::unique_ptr<VAAPIEncoder> m_encoder;
+    std::unique_ptr<EncoderBackend> m_encoder;
     std::unique_ptr<ControlServer> m_control;
     std::unique_ptr<VideoSender> m_video_sender;
     std::unique_ptr<InputReceiver> m_input_receiver;
