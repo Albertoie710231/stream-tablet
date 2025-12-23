@@ -1,10 +1,16 @@
 package com.streamtablet
 
 import android.os.Bundle
+import android.text.Editable
+import android.text.TextWatcher
+import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -14,6 +20,7 @@ import com.streamtablet.audio.AudioReceiver
 import com.streamtablet.calibration.CalibrationManager
 import com.streamtablet.databinding.ActivityStreamBinding
 import com.streamtablet.input.InputHandler
+import com.streamtablet.input.FourFingerGestureDetector
 import com.streamtablet.network.ConnectionManager
 import com.streamtablet.video.VideoDecoder
 import kotlinx.coroutines.Dispatchers
@@ -58,6 +65,14 @@ class StreamActivity : AppCompatActivity() {
     @Volatile
     private var lastFramesDecoded = 0L
 
+    // Keyboard and gesture support
+    private lateinit var gestureDetector: FourFingerGestureDetector
+    private var isKeyboardVisible = false
+    private var currentKeyboardHeight = 0
+    private var serverWidth = 0
+    private var serverHeight = 0
+    private var isProcessingTextChange = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -80,6 +95,65 @@ class StreamActivity : AppCompatActivity() {
         calibrationManager = CalibrationManager(this)
         inputHandler = InputHandler(connectionManager, calibrationManager)
 
+        // Initialize gesture detector for keyboard toggle
+        gestureDetector = FourFingerGestureDetector { toggleKeyboard() }
+
+        // Set up keyboard insets listener to track keyboard visibility and resize video
+        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->
+            val imeHeight = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+            isKeyboardVisible = imeHeight > 0
+            resizeVideoForKeyboard(imeHeight)
+            insets
+        }
+
+        // Set up keyboard input capture using TextWatcher (works with soft keyboard)
+        binding.keyboardInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                // Only process if new characters were added (count > 0) and not during our clear
+                if (isProcessingTextChange || count == 0) return
+                s?.let {
+                    // Send only the newly added characters
+                    for (i in start until start + count) {
+                        if (i < it.length) {
+                            inputHandler.sendCharacter(it[i])
+                        }
+                    }
+                }
+            }
+            override fun afterTextChanged(s: Editable?) {
+                if (isProcessingTextChange) return
+                s?.let {
+                    if (it.isNotEmpty()) {
+                        isProcessingTextChange = true
+                        it.clear()
+                        isProcessingTextChange = false
+                    }
+                }
+            }
+        })
+
+        // Handle soft keyboard Enter/Done action
+        binding.keyboardInput.setOnEditorActionListener { _, actionId, _ ->
+            // Send Enter key for any editor action (Done, Go, Send, etc.)
+            inputHandler.sendKeyEvent(KeyEvent.KEYCODE_ENTER, true)
+            inputHandler.sendKeyEvent(KeyEvent.KEYCODE_ENTER, false)
+            true
+        }
+
+        // Also handle hardware keyboard events (backspace, enter, etc.)
+        binding.keyboardInput.setOnKeyListener { _, keyCode, event ->
+            if (keyCode == KeyEvent.KEYCODE_DEL || keyCode == KeyEvent.KEYCODE_ENTER) {
+                when (event.action) {
+                    KeyEvent.ACTION_DOWN -> inputHandler.sendKeyEvent(keyCode, true)
+                    KeyEvent.ACTION_UP -> inputHandler.sendKeyEvent(keyCode, false)
+                }
+                true
+            } else {
+                false  // Let TextWatcher handle regular characters
+            }
+        }
+
         // Set disconnect callback to exit stream screen when host disconnects
         connectionManager.onDisconnected = {
             android.util.Log.i("StreamActivity", "Host disconnected, returning to main screen")
@@ -89,8 +163,19 @@ class StreamActivity : AppCompatActivity() {
         }
 
         // Set up touch and hover handling for stylus support
+        // Check for 4-finger gesture first, then pass to input handler
         binding.videoSurface.setOnTouchListener { view, event ->
-            inputHandler.onTouch(view, event)
+            val consumed = gestureDetector.onTouchEvent(event)
+
+            // If gesture was triggered, cancel any touches that leaked through
+            if (gestureDetector.wasTriggered()) {
+                inputHandler.cancelAllTouches()
+                gestureDetector.clearTriggered()
+            }
+
+            if (!consumed) {
+                inputHandler.onTouch(view, event)
+            }
             true
         }
         binding.videoSurface.setOnHoverListener { view, event ->
@@ -167,6 +252,10 @@ class StreamActivity : AppCompatActivity() {
     private fun startDecoder(holder: android.view.SurfaceHolder) {
         try {
             val config = connectionManager.getConfig()
+
+            // Store server dimensions for keyboard resize calculations
+            serverWidth = config.width
+            serverHeight = config.height
 
             // Adjust surface size for aspect ratio if needed
             if (maintainAspectRatio) {
@@ -307,22 +396,46 @@ class StreamActivity : AppCompatActivity() {
         }
     }
 
+    private fun toggleKeyboard() {
+        val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
+        if (isKeyboardVisible) {
+            // Hide keyboard
+            imm.hideSoftInputFromWindow(binding.keyboardInput.windowToken, 0)
+        } else {
+            // Show keyboard
+            binding.keyboardInput.requestFocus()
+            imm.showSoftInput(binding.keyboardInput, InputMethodManager.SHOW_IMPLICIT)
+        }
+        android.util.Log.i("StreamActivity", "Keyboard toggled: visible=$isKeyboardVisible")
+    }
+
+    private fun resizeVideoForKeyboard(keyboardHeight: Int) {
+        currentKeyboardHeight = keyboardHeight
+        runOnUiThread {
+            // Re-adjust aspect ratio with keyboard-aware available space
+            if (serverWidth > 0 && serverHeight > 0 && maintainAspectRatio) {
+                adjustSurfaceAspectRatio(serverWidth, serverHeight)
+            }
+            android.util.Log.i("StreamActivity", "Resizing video for keyboard: keyboardHeight=$keyboardHeight")
+        }
+    }
+
     private fun adjustSurfaceAspectRatio(sourceWidth: Int, sourceHeight: Int) {
         runOnUiThread {
             val parent = binding.videoSurface.parent as? FrameLayout ?: return@runOnUiThread
 
-            // Get screen dimensions
+            // Get screen dimensions, accounting for keyboard
             val screenWidth = parent.width
-            val screenHeight = parent.height
+            val availableHeight = parent.height - currentKeyboardHeight
 
-            if (screenWidth == 0 || screenHeight == 0) {
+            if (screenWidth == 0 || availableHeight <= 0) {
                 // Layout not ready, try again after layout
                 parent.post { adjustSurfaceAspectRatio(sourceWidth, sourceHeight) }
                 return@runOnUiThread
             }
 
             val sourceAspect = sourceWidth.toFloat() / sourceHeight.toFloat()
-            val screenAspect = screenWidth.toFloat() / screenHeight.toFloat()
+            val screenAspect = screenWidth.toFloat() / availableHeight.toFloat()
 
             val newWidth: Int
             val newHeight: Int
@@ -333,16 +446,26 @@ class StreamActivity : AppCompatActivity() {
                 newHeight = (screenWidth / sourceAspect).toInt()
             } else {
                 // Source is taller - fit to height, add black bars left/right
-                newHeight = screenHeight
-                newWidth = (screenHeight * sourceAspect).toInt()
+                newHeight = availableHeight
+                newWidth = (availableHeight * sourceAspect).toInt()
             }
 
             val params = binding.videoSurface.layoutParams as FrameLayout.LayoutParams
             params.width = newWidth
             params.height = newHeight
+            // Position video just above keyboard when visible
+            if (currentKeyboardHeight > 0) {
+                params.topMargin = 0
+                params.bottomMargin = currentKeyboardHeight
+                params.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            } else {
+                params.topMargin = 0
+                params.bottomMargin = 0
+                params.gravity = Gravity.CENTER
+            }
             binding.videoSurface.layoutParams = params
 
-            android.util.Log.i("StreamActivity", "Adjusted surface: ${sourceWidth}x${sourceHeight} -> ${newWidth}x${newHeight}")
+            android.util.Log.i("StreamActivity", "Adjusted surface: ${sourceWidth}x${sourceHeight} -> ${newWidth}x${newHeight} (keyboard=$currentKeyboardHeight)")
         }
     }
 

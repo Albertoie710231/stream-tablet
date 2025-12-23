@@ -422,6 +422,16 @@ void Server::handle_input(const InputEvent& event) {
             m_uinput->sync();
             break;
 
+        case InputEventType::KEY_DOWN:
+        case InputEventType::KEY_UP: {
+            bool pressed = (event.type == InputEventType::KEY_DOWN);
+            // Keycode is stored in the buttons field
+            uint16_t keycode = event.buttons;
+            m_uinput->send_key(keycode, pressed);
+            LOG_DEBUG("Key event: keycode=%d pressed=%d", keycode, pressed);
+            break;
+        }
+
         default:
             break;
     }
