@@ -30,6 +30,9 @@ public:
     // Send keyboard key event
     void send_key(uint16_t keycode, bool pressed);
 
+    // Send scroll wheel event (direction: positive = up, negative = down)
+    void send_scroll(int direction);
+
     // Release all pressed buttons and tools (call on disconnect/shutdown)
     void reset_all();
 

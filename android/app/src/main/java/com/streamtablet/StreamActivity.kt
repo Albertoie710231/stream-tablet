@@ -154,6 +154,9 @@ class StreamActivity : AppCompatActivity() {
             }
         }
 
+        // Set up navigation button click handlers
+        setupNavButtons()
+
         // Set disconnect callback to exit stream screen when host disconnects
         connectionManager.onDisconnected = {
             android.util.Log.i("StreamActivity", "Host disconnected, returning to main screen")
@@ -412,12 +415,29 @@ class StreamActivity : AppCompatActivity() {
     private fun resizeVideoForKeyboard(keyboardHeight: Int) {
         currentKeyboardHeight = keyboardHeight
         runOnUiThread {
+            // Show/hide navigation buttons based on keyboard visibility
+            binding.navButtonsContainer.visibility = if (keyboardHeight > 0) View.VISIBLE else View.GONE
+
             // Re-adjust aspect ratio with keyboard-aware available space
             if (serverWidth > 0 && serverHeight > 0 && maintainAspectRatio) {
                 adjustSurfaceAspectRatio(serverWidth, serverHeight)
             }
             android.util.Log.i("StreamActivity", "Resizing video for keyboard: keyboardHeight=$keyboardHeight")
         }
+    }
+
+    private fun setupNavButtons() {
+        // Helper to send key press and release
+        fun sendKey(keyCode: Int) {
+            inputHandler.sendKeyEvent(keyCode, true)
+            inputHandler.sendKeyEvent(keyCode, false)
+        }
+
+        binding.btnTab.setOnClickListener { sendKey(KeyEvent.KEYCODE_TAB) }
+        binding.btnUp.setOnClickListener { sendKey(KeyEvent.KEYCODE_DPAD_UP) }
+        binding.btnDown.setOnClickListener { sendKey(KeyEvent.KEYCODE_DPAD_DOWN) }
+        binding.btnLeft.setOnClickListener { sendKey(KeyEvent.KEYCODE_DPAD_LEFT) }
+        binding.btnRight.setOnClickListener { sendKey(KeyEvent.KEYCODE_DPAD_RIGHT) }
     }
 
     private fun adjustSurfaceAspectRatio(sourceWidth: Int, sourceHeight: Int) {

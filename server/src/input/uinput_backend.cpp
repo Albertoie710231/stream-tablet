@@ -145,6 +145,11 @@ bool UInputBackend::init_mouse_device() {
     ioctl(m_mouse_fd, UI_SET_KEYBIT, BTN_RIGHT);
     ioctl(m_mouse_fd, UI_SET_KEYBIT, BTN_MIDDLE);
 
+    // Relative events for scroll wheel
+    ioctl(m_mouse_fd, UI_SET_EVBIT, EV_REL);
+    ioctl(m_mouse_fd, UI_SET_RELBIT, REL_WHEEL);
+    ioctl(m_mouse_fd, UI_SET_RELBIT, REL_HWHEEL);
+
     // Absolute axes for positioning
     ioctl(m_mouse_fd, UI_SET_EVBIT, EV_ABS);
 
@@ -340,6 +345,13 @@ void UInputBackend::send_key(uint16_t keycode, bool pressed) {
 
     emit(m_keyboard_fd, EV_KEY, keycode, pressed ? 1 : 0);
     emit(m_keyboard_fd, EV_SYN, SYN_REPORT, 0);
+}
+
+void UInputBackend::send_scroll(int direction) {
+    if (m_mouse_fd < 0) return;
+
+    emit(m_mouse_fd, EV_REL, REL_WHEEL, direction);
+    emit(m_mouse_fd, EV_SYN, SYN_REPORT, 0);
 }
 
 void UInputBackend::emit(int fd, int type, int code, int value) {

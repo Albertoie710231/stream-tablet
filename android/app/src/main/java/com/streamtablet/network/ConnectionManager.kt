@@ -616,7 +616,8 @@ enum class InputEventType(val value: Byte) {
     STYLUS_UP(0x06),
     STYLUS_HOVER(0x07),
     KEY_DOWN(0x08),
-    KEY_UP(0x09)
+    KEY_UP(0x09),
+    SCROLL(0x0A)
 }
 
 data class InputEvent(

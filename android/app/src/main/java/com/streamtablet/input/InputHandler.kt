@@ -1,5 +1,7 @@
 package com.streamtablet.input
 
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -24,6 +26,26 @@ class InputHandler(
     private var lastSentChar: Char = '\u0000'
     private var lastSentTime: Long = 0
     private val DEDUP_WINDOW_MS = 100L
+
+    // Two-finger scroll tracking
+    private var isTwoFingerScroll = false
+    private var lastScrollY = 0f
+    private var scrollAccumulator = 0f
+    private val SCROLL_THRESHOLD = 20f  // Pixels needed to trigger one scroll step
+
+    // Multi-finger gesture detection - delay touch down to avoid leaking touches
+    // when user starts a multi-finger gesture
+    private val gestureHandler = Handler(Looper.getMainLooper())
+    private var pendingTouchDown = false
+    private var pendingTouchView: View? = null
+    private var pendingTouchX = 0f
+    private var pendingTouchY = 0f
+    private var pendingTouchPressure = 0f
+    private var pendingTouchPointerId = 0
+    private var touchDownSent = false
+    private var isMultiFingerGesture = false
+    private val GESTURE_DETECTION_DELAY_MS = 80L  // ms to wait before sending touch down
+    private val MOVEMENT_THRESHOLD_SQ = 100f  // 10px squared - movement to commit to single touch
 
     private fun getSlotForPointerId(pointerId: Int): Int {
         // Return existing slot if already mapped
@@ -73,45 +95,232 @@ class InputHandler(
         Log.d(TAG, "Cancelled all active touches")
     }
 
+    private val pendingTouchRunnable = Runnable {
+        // Timer fired - commit to single touch if still pending
+        if (pendingTouchDown && !isMultiFingerGesture) {
+            pendingTouchView?.let { view ->
+                sendPendingTouchDown(view)
+            }
+        }
+    }
+
+    private fun sendPendingTouchDown(view: View) {
+        if (!touchDownSent && pendingTouchDown) {
+            val slot = getSlotForPointerId(pendingTouchPointerId)
+            val x = (pendingTouchX / view.width).coerceIn(0f, 1f)
+            val y = (pendingTouchY / view.height).coerceIn(0f, 1f)
+
+            val inputEvent = InputEvent(
+                type = InputEventType.TOUCH_DOWN,
+                pointerId = slot.toByte(),
+                x = x,
+                y = y,
+                pressure = pendingTouchPressure,
+                tiltX = 0f,
+                tiltY = 0f,
+                buttons = 0,
+                timestamp = (System.currentTimeMillis() % Int.MAX_VALUE).toInt()
+            )
+            connectionManager.sendInput(inputEvent)
+            touchDownSent = true
+            pendingTouchDown = false
+            Log.d(TAG, "Sent delayed TOUCH_DOWN for slot $slot")
+        }
+    }
+
+    private fun cancelPendingTouch() {
+        gestureHandler.removeCallbacks(pendingTouchRunnable)
+        pendingTouchDown = false
+        pendingTouchView = null
+        touchDownSent = false
+    }
+
     override fun onTouch(view: View, event: MotionEvent): Boolean {
         val pointerCount = event.pointerCount
         val action = event.actionMasked
         val actionIndex = event.actionIndex
 
-        when (action) {
-            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
-                sendEvent(view, event, actionIndex, getDownEventType(event, actionIndex))
-            }
+        // Check for finger vs stylus touch
+        val isFingerTouch = event.getToolType(0) == MotionEvent.TOOL_TYPE_FINGER
+        val isStylus = event.getToolType(actionIndex) == MotionEvent.TOOL_TYPE_STYLUS
 
-            MotionEvent.ACTION_MOVE -> {
-                // Send move events for all pointers
-                for (i in 0 until pointerCount) {
-                    sendEvent(view, event, i, getMoveEventType(event, i))
+        when (action) {
+            MotionEvent.ACTION_DOWN -> {
+                if (isStylus) {
+                    // Stylus doesn't use gesture detection delay
+                    sendEvent(view, event, actionIndex, InputEventType.STYLUS_DOWN)
+                } else if (isFingerTouch) {
+                    // Start gesture detection - don't send touch down yet
+                    isMultiFingerGesture = false
+                    isTwoFingerScroll = false
+                    touchDownSent = false
+                    pendingTouchDown = true
+                    pendingTouchView = view
+                    pendingTouchX = event.x
+                    pendingTouchY = event.y
+                    pendingTouchPressure = event.pressure.coerceIn(0f, 1f)
+                    pendingTouchPointerId = event.getPointerId(0)
+
+                    // Start timer - if no more fingers arrive, send touch down
+                    gestureHandler.postDelayed(pendingTouchRunnable, GESTURE_DETECTION_DELAY_MS)
+                    Log.d(TAG, "Started gesture detection timer")
                 }
             }
 
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
-                sendEvent(view, event, actionIndex, getUpEventType(event, actionIndex))
-                // Release slot on touch up
-                val pointerId = event.getPointerId(actionIndex)
-                if (!isStylus(event, actionIndex)) {
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                if (isFingerTouch) {
+                    // Additional finger arrived - this is a multi-finger gesture
+                    isMultiFingerGesture = true
+                    cancelPendingTouch()
+
+                    // Cancel any touches that were already sent
+                    if (touchDownSent) {
+                        cancelAllTouches()
+                        touchDownSent = false
+                    }
+
+                    if (pointerCount == 2) {
+                        // Start two-finger scroll mode
+                        isTwoFingerScroll = true
+                        lastScrollY = (event.getY(0) + event.getY(1)) / 2f
+                        scrollAccumulator = 0f
+                        Log.d(TAG, "Started two-finger scroll mode (multi-finger gesture)")
+                    } else {
+                        Log.d(TAG, "Multi-finger gesture with $pointerCount fingers")
+                    }
+                }
+            }
+
+            MotionEvent.ACTION_MOVE -> {
+                if (isMultiFingerGesture) {
+                    if (isTwoFingerScroll && pointerCount >= 2) {
+                        // Handle scroll
+                        val currentY = (event.getY(0) + event.getY(1)) / 2f
+                        val deltaY = lastScrollY - currentY  // Invert for natural scroll direction
+                        lastScrollY = currentY
+
+                        scrollAccumulator += deltaY
+
+                        // Send scroll events when threshold is reached
+                        while (scrollAccumulator >= SCROLL_THRESHOLD) {
+                            sendScrollEvent(1)  // Scroll up
+                            scrollAccumulator -= SCROLL_THRESHOLD
+                        }
+                        while (scrollAccumulator <= -SCROLL_THRESHOLD) {
+                            sendScrollEvent(-1)  // Scroll down
+                            scrollAccumulator += SCROLL_THRESHOLD
+                        }
+                    }
+                    // Ignore move events during other multi-finger gestures
+                } else if (isFingerTouch) {
+                    // Check if we should commit to single touch based on movement
+                    if (pendingTouchDown && !touchDownSent) {
+                        val dx = event.x - pendingTouchX
+                        val dy = event.y - pendingTouchY
+                        val distSq = dx * dx + dy * dy
+                        if (distSq > MOVEMENT_THRESHOLD_SQ) {
+                            // Significant movement - commit to single touch
+                            gestureHandler.removeCallbacks(pendingTouchRunnable)
+                            sendPendingTouchDown(view)
+                        }
+                    }
+
+                    // Send move events if touch down was sent
+                    if (touchDownSent) {
+                        for (i in 0 until pointerCount) {
+                            sendEvent(view, event, i, getMoveEventType(event, i))
+                        }
+                    }
+                } else if (isStylus) {
+                    sendEvent(view, event, actionIndex, InputEventType.STYLUS_MOVE)
+                }
+            }
+
+            MotionEvent.ACTION_UP -> {
+                if (isMultiFingerGesture) {
+                    // End of multi-finger gesture
+                    isMultiFingerGesture = false
+                    isTwoFingerScroll = false
+                    scrollAccumulator = 0f
+                    cancelPendingTouch()
+                    Log.d(TAG, "Ended multi-finger gesture")
+                } else if (isStylus) {
+                    sendEvent(view, event, actionIndex, InputEventType.STYLUS_UP)
+                } else {
+                    // Single finger up
+                    gestureHandler.removeCallbacks(pendingTouchRunnable)
+
+                    // If we had a pending touch that wasn't sent yet, send it now as a quick tap
+                    if (pendingTouchDown && !touchDownSent) {
+                        sendPendingTouchDown(view)
+                    }
+
+                    if (touchDownSent) {
+                        sendEvent(view, event, actionIndex, InputEventType.TOUCH_UP)
+                        val pointerId = event.getPointerId(actionIndex)
+                        releaseSlot(pointerId)
+                        touchDownSent = false
+                    }
+
+                    pendingTouchDown = false
+                    pendingTouchView = null
+                }
+            }
+
+            MotionEvent.ACTION_POINTER_UP -> {
+                if (isMultiFingerGesture) {
+                    // One finger lifted during multi-finger gesture
+                    if (pointerCount <= 2) {
+                        // Going back to single finger - end gesture mode
+                        isMultiFingerGesture = false
+                        isTwoFingerScroll = false
+                        scrollAccumulator = 0f
+                        Log.d(TAG, "Ended multi-finger gesture (finger lifted)")
+                    }
+                } else if (!isStylus) {
+                    sendEvent(view, event, actionIndex, InputEventType.TOUCH_UP)
+                    val pointerId = event.getPointerId(actionIndex)
                     releaseSlot(pointerId)
                 }
             }
 
             MotionEvent.ACTION_CANCEL -> {
-                // Send up events for all pointers and release all slots
-                for (i in 0 until pointerCount) {
-                    sendEvent(view, event, i, getUpEventType(event, i))
-                    val pointerId = event.getPointerId(i)
-                    if (!isStylus(event, i)) {
-                        releaseSlot(pointerId)
+                isMultiFingerGesture = false
+                isTwoFingerScroll = false
+                scrollAccumulator = 0f
+                cancelPendingTouch()
+
+                if (touchDownSent) {
+                    // Send up events for all pointers and release all slots
+                    for (i in 0 until pointerCount) {
+                        sendEvent(view, event, i, getUpEventType(event, i))
+                        val pointerId = event.getPointerId(i)
+                        if (!isStylus(event, i)) {
+                            releaseSlot(pointerId)
+                        }
                     }
+                    touchDownSent = false
                 }
             }
         }
 
         return true
+    }
+
+    private fun sendScrollEvent(direction: Int) {
+        val inputEvent = InputEvent(
+            type = InputEventType.SCROLL,
+            pointerId = 0,
+            x = 0f,
+            y = direction.toFloat(),  // +1 for scroll up, -1 for scroll down
+            pressure = 0f,
+            tiltX = 0f,
+            tiltY = 0f,
+            buttons = 0,
+            timestamp = (System.currentTimeMillis() % Int.MAX_VALUE).toInt()
+        )
+        connectionManager.sendInput(inputEvent)
+        Log.d(TAG, "Sent scroll event: direction=$direction")
     }
 
     // Handle stylus hover events (when stylus is near screen but not touching)

@@ -55,4 +55,66 @@
         android:inputType="textNoSuggestions|textVisiblePassword"
         android:imeOptions="flagNoExtractUi|flagNoFullscreen|actionNone" />
 
+    <!-- Navigation buttons (visible when keyboard is shown) -->
+    <LinearLayout
+        android:id="@+id/navButtonsContainer"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="start|center_vertical"
+        android:layout_marginStart="8dp"
+        android:orientation="horizontal"
+        android:visibility="gone">
+
+        <!-- Tab button -->
+        <Button
+            android:id="@+id/btnTab"
+            android:layout_width="72dp"
+            android:layout_height="72dp"
+            android:text="Tab"
+            android:textSize="14sp"
+            android:layout_marginEnd="16dp"
+            android:backgroundTint="#80404040" />
+
+        <!-- Arrow keys in a row -->
+        <Button
+            android:id="@+id/btnLeft"
+            android:layout_width="56dp"
+            android:layout_height="72dp"
+            android:text="&lt;"
+            android:textSize="20sp"
+            android:backgroundTint="#80404040" />
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <Button
+                android:id="@+id/btnUp"
+                android:layout_width="56dp"
+                android:layout_height="36dp"
+                android:text="^"
+                android:textSize="16sp"
+                android:backgroundTint="#80404040" />
+
+            <Button
+                android:id="@+id/btnDown"
+                android:layout_width="56dp"
+                android:layout_height="36dp"
+                android:text="v"
+                android:textSize="16sp"
+                android:backgroundTint="#80404040" />
+
+        </LinearLayout>
+
+        <Button
+            android:id="@+id/btnRight"
+            android:layout_width="56dp"
+            android:layout_height="72dp"
+            android:text="&gt;"
+            android:textSize="20sp"
+            android:backgroundTint="#80404040" />
+
+    </LinearLayout>
+
 </FrameLayout>

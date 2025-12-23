@@ -432,6 +432,14 @@ void Server::handle_input(const InputEvent& event) {
             break;
         }
 
+        case InputEventType::SCROLL: {
+            // Scroll direction is stored in the y field (+1 = up, -1 = down)
+            int direction = static_cast<int>(event.y);
+            m_uinput->send_scroll(direction);
+            LOG_DEBUG("Scroll event: direction=%d", direction);
+            break;
+        }
+
         default:
             break;
     }
