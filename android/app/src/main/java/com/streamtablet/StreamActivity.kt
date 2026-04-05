@@ -433,6 +433,7 @@ class StreamActivity : AppCompatActivity() {
             inputHandler.sendKeyEvent(keyCode, false)
         }
 
+        binding.btnEsc.setOnClickListener { sendKey(KeyEvent.KEYCODE_ESCAPE) }
         binding.btnTab.setOnClickListener { sendKey(KeyEvent.KEYCODE_TAB) }
         binding.btnUp.setOnClickListener { sendKey(KeyEvent.KEYCODE_DPAD_UP) }
         binding.btnDown.setOnClickListener { sendKey(KeyEvent.KEYCODE_DPAD_DOWN) }
