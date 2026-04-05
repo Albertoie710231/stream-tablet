@@ -46,7 +46,8 @@ public:
 
 private:
     bool create_capture_backend(const char* display);
-    void capture_and_encode_loop();
+    bool init_encoder_from_client(const ClientInfo& client);
+    bool capture_and_encode_loop();  // returns true if a frame was captured+encoded
     void handle_input(const InputEvent& event);
 
 #ifdef HAVE_OPUS

@@ -36,6 +36,14 @@ class StreamActivity : AppCompatActivity() {
         const val EXTRA_SERVER_ADDRESS = "server_address"
         const val EXTRA_PORT = "port"
         const val EXTRA_MAINTAIN_ASPECT_RATIO = "maintain_aspect_ratio"
+        const val EXTRA_CODEC = "codec"
+        const val EXTRA_FPS = "fps"
+        const val EXTRA_QUALITY = "quality"
+        const val EXTRA_CQP = "cqp"
+        const val EXTRA_BITRATE = "bitrate"
+        const val EXTRA_PACING = "pacing"
+        const val EXTRA_AUDIO_ENABLED = "audio_enabled"
+        const val EXTRA_AUDIO_BITRATE = "audio_bitrate"
     }
 
     private lateinit var binding: ActivityStreamBinding
@@ -91,7 +99,16 @@ class StreamActivity : AppCompatActivity() {
         maintainAspectRatio = intent.getBooleanExtra(EXTRA_MAINTAIN_ASPECT_RATIO, true)
 
         // Initialize components
-        connectionManager = ConnectionManager()
+        connectionManager = ConnectionManager().apply {
+            preferredCodec = intent.getIntExtra(EXTRA_CODEC, 0)
+            preferredFps = intent.getIntExtra(EXTRA_FPS, 60)
+            preferredQuality = intent.getIntExtra(EXTRA_QUALITY, 0)
+            preferredCqp = intent.getIntExtra(EXTRA_CQP, 24)
+            preferredBitrate = intent.getIntExtra(EXTRA_BITRATE, 0)
+            preferredPacing = intent.getIntExtra(EXTRA_PACING, 0)
+            preferredAudioEnabled = intent.getBooleanExtra(EXTRA_AUDIO_ENABLED, true)
+            preferredAudioBitrate = intent.getIntExtra(EXTRA_AUDIO_BITRATE, 128000)
+        }
         calibrationManager = CalibrationManager(this)
         inputHandler = InputHandler(connectionManager, calibrationManager)
 

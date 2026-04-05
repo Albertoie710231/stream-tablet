@@ -39,6 +39,9 @@ public:
     // Get backend name for logging
     virtual const char* get_name() const = 0;
 
+    // Set target framerate (hint for backends that support it)
+    virtual void set_framerate(int fps) { (void)fps; }
+
 protected:
     CaptureBackend() = default;
 

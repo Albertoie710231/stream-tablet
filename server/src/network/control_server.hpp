@@ -14,6 +14,16 @@ struct ClientInfo {
     uint16_t input_port = 0;
     int width = 0;
     int height = 0;
+
+    // Streaming preferences from client
+    uint8_t codec = 0;         // 0=auto, 1=av1, 2=hevc, 3=h264
+    uint8_t fps = 60;          // 1-120
+    uint8_t quality_mode = 0;  // 0=auto, 1=low, 2=balanced, 3=high
+    uint8_t cqp = 24;          // 1-51
+    uint32_t bitrate = 0;      // 0=auto
+    uint8_t pacing_mode = 0;   // 0=auto, 1=none, 2=light, 3=aggressive, 4=keyframe
+    uint8_t audio_enabled = 1;
+    uint32_t audio_bitrate = 128000;
 };
 
 class ControlServer {

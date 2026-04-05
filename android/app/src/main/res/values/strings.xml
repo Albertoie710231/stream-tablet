@@ -13,4 +13,42 @@
     <string name="calibrate_stylus">Calibrate Stylus</string>
     <string name="not_calibrated">Stylus not calibrated</string>
     <string name="calibrated">Stylus calibrated</string>
+
+    <!-- Stream settings -->
+    <string name="stream_settings">Stream Settings</string>
+    <string name="codec">Codec</string>
+    <string name="fps">FPS</string>
+    <string name="quality_mode">Quality</string>
+    <string name="cqp_value">CQP (1-51, lower = better)</string>
+    <string name="cqp_value_short">CQP (1-51)</string>
+    <string name="bitrate_kbps">Bitrate (kbps, empty = auto)</string>
+    <string name="bitrate_kbps_short">Bitrate (kbps)</string>
+    <string name="pacing_mode">Pacing</string>
+    <string name="audio">Audio</string>
+    <string name="audio_bitrate_kbps">Audio bitrate (kbps)</string>
+    <string name="audio_bitrate_kbps_short">Audio kbps</string>
+    <string name="auto">Auto</string>
+
+    <!-- Spinner arrays -->
+    <string-array name="codec_options">
+        <item>Auto</item>
+        <item>AV1</item>
+        <item>HEVC</item>
+        <item>H.264</item>
+    </string-array>
+
+    <string-array name="quality_options">
+        <item>Auto (CQP)</item>
+        <item>Low Latency (CBR)</item>
+        <item>Balanced (CBR)</item>
+        <item>High Quality (CQP)</item>
+    </string-array>
+
+    <string-array name="pacing_options">
+        <item>Auto</item>
+        <item>None</item>
+        <item>Light</item>
+        <item>Aggressive</item>
+        <item>Keyframe only</item>
+    </string-array>
 </resources>

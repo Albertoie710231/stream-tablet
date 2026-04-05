@@ -163,17 +163,37 @@ bool ControlServer::accept_client(ClientInfo& out_info) {
         return false;
     }
 
-    // Parse config request (simple format: width(2), height(2), video_port(2), input_port(2))
+    // Parse config request
+    // Base format (8 bytes): width(2), height(2), video_port(2), input_port(2)
+    // Extended format (22 bytes): + codec(1), fps(1), quality(1), cqp(1), bitrate(4), pacing(1), audio_enabled(1), audio_bitrate(4)
     if (msg_data.size() >= 8) {
         out_info.width = (msg_data[0] << 8) | msg_data[1];
         out_info.height = (msg_data[2] << 8) | msg_data[3];
         out_info.video_port = (msg_data[4] << 8) | msg_data[5];
         out_info.input_port = (msg_data[6] << 8) | msg_data[7];
     }
+    if (msg_data.size() >= 22) {
+        out_info.codec = msg_data[8];
+        out_info.fps = msg_data[9];
+        out_info.quality_mode = msg_data[10];
+        out_info.cqp = msg_data[11];
+        out_info.bitrate = (msg_data[12] << 24) | (msg_data[13] << 16) | (msg_data[14] << 8) | msg_data[15];
+        out_info.pacing_mode = msg_data[16];
+        out_info.audio_enabled = msg_data[17];
+        out_info.audio_bitrate = (msg_data[18] << 24) | (msg_data[19] << 16) | (msg_data[20] << 8) | msg_data[21];
+    }
     out_info.host = m_client_host;
+
+    const char* codec_names[] = {"auto", "AV1", "HEVC", "H.264"};
+    const char* quality_names[] = {"auto", "low", "balanced", "high"};
+    const char* codec_name = (out_info.codec < 4) ? codec_names[out_info.codec] : "unknown";
+    const char* quality_name = (out_info.quality_mode < 4) ? quality_names[out_info.quality_mode] : "unknown";
 
     LOG_INFO("Client config: %dx%d, video_port=%d, input_port=%d",
              out_info.width, out_info.height, out_info.video_port, out_info.input_port);
+    LOG_INFO("Client stream prefs: codec=%s, fps=%d, quality=%s, cqp=%d, bitrate=%d, pacing=%d, audio=%d, audio_bitrate=%d",
+             codec_name, out_info.fps, quality_name, out_info.cqp,
+             out_info.bitrate, out_info.pacing_mode, out_info.audio_enabled, out_info.audio_bitrate);
 
     m_client_connected = true;
     return true;

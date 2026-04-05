@@ -98,26 +98,6 @@ bool Server::init(const ServerConfig& config) {
 
     LOG_INFO("Using %s capture backend", m_capture->get_name());
 
-    // Initialize VA-API encoder
-    EncoderConfig enc_config;
-    enc_config.width = m_capture->get_width();
-    enc_config.height = m_capture->get_height();
-    enc_config.framerate = config.capture_fps;
-    enc_config.bitrate = config.bitrate;
-    enc_config.gop_size = config.gop_size;
-    enc_config.low_latency = (config.quality_mode != QualityMode::HIGH_QUALITY &&
-                               config.quality_mode != QualityMode::AUTO);
-    enc_config.quality_mode = config.quality_mode;
-    enc_config.codec_type = config.codec_type;
-    enc_config.cqp = config.cqp;
-
-    m_encoder = create_encoder(enc_config);
-    if (!m_encoder) {
-        LOG_ERROR("Failed to initialize hardware encoder");
-        return false;
-    }
-    LOG_INFO("Using %s encoder backend", m_encoder->get_name());
-
     // Initialize control server
     m_control = std::make_unique<ControlServer>();
     if (!m_control->init_plain(config.control_port)) {
@@ -143,7 +123,6 @@ bool Server::init(const ServerConfig& config) {
     m_uinput = std::make_unique<UInputBackend>();
     if (!m_uinput->init(m_capture->get_width(), m_capture->get_height())) {
         LOG_WARN("Failed to initialize uinput (stylus input may not work)");
-        // Continue without uinput - it's not fatal
     }
 
     // Set input callback
@@ -151,25 +130,119 @@ bool Server::init(const ServerConfig& config) {
         handle_input(event);
     });
 
-    // Set keyframe callback
+    LOG_INFO("Server initialized: %dx%d, waiting for client to configure stream...",
+             m_capture->get_width(), m_capture->get_height());
+
+    return true;
+}
+
+bool Server::init_encoder_from_client(const ClientInfo& client) {
+    // Map client codec preference to CodecType
+    CodecType codec = CodecType::AUTO;
+    switch (client.codec) {
+        case 1: codec = CodecType::AV1; break;
+        case 2: codec = CodecType::HEVC; break;
+        case 3: codec = CodecType::H264; break;
+        default: codec = CodecType::AUTO; break;
+    }
+
+    // Map client quality mode
+    QualityMode quality = QualityMode::AUTO;
+    switch (client.quality_mode) {
+        case 1: quality = QualityMode::LOW_LATENCY; break;
+        case 2: quality = QualityMode::BALANCED; break;
+        case 3: quality = QualityMode::HIGH_QUALITY; break;
+        default: quality = QualityMode::AUTO; break;
+    }
+
+    int fps = client.fps;
+    if (fps < 1) fps = 1;
+    if (fps > 120) fps = 120;
+    m_config.capture_fps = fps;
+
+    // Update capture backend framerate (PipeWire will reconnect stream)
+    m_capture->set_framerate(fps);
+
+    // Auto-calculate bitrate if client sent 0
+    int bitrate = static_cast<int>(client.bitrate);
+    if (bitrate == 0) {
+        switch (quality) {
+            case QualityMode::AUTO:
+                bitrate = (100000000LL * fps) / 60;
+                break;
+            case QualityMode::LOW_LATENCY:
+                bitrate = (10000000LL * fps) / 60;
+                break;
+            case QualityMode::BALANCED:
+                bitrate = (20000000LL * fps) / 60;
+                break;
+            case QualityMode::HIGH_QUALITY:
+                bitrate = (100000000LL * fps) / 60;
+                break;
+        }
+    }
+
+    int gop_size = fps / 2;
+    if (gop_size < 1) gop_size = 1;
+
+    int cqp = client.cqp;
+    if (cqp < 1) cqp = 1;
+    if (cqp > 51) cqp = 51;
+
+    // Update pacing mode
+    m_config.pacing_mode = client.pacing_mode;
+    if (quality == QualityMode::AUTO && m_config.pacing_mode == 0) {
+        m_config.pacing_mode = 4;  // KEYFRAME pacing for AUTO quality
+    }
+
+    // Update audio config
+    m_config.audio_enabled = (client.audio_enabled != 0);
+    if (client.audio_bitrate > 0) {
+        m_config.audio_bitrate = static_cast<int>(client.audio_bitrate);
+        if (m_config.audio_bitrate < 16000) m_config.audio_bitrate = 16000;
+        if (m_config.audio_bitrate > 510000) m_config.audio_bitrate = 510000;
+    }
+
+    // Create encoder
+    EncoderConfig enc_config;
+    enc_config.width = m_capture->get_width();
+    enc_config.height = m_capture->get_height();
+    enc_config.framerate = fps;
+    enc_config.bitrate = bitrate;
+    enc_config.gop_size = gop_size;
+    enc_config.low_latency = (quality != QualityMode::HIGH_QUALITY && quality != QualityMode::AUTO);
+    enc_config.quality_mode = quality;
+    enc_config.codec_type = codec;
+    enc_config.cqp = cqp;
+
+    m_encoder = create_encoder(enc_config);
+    if (!m_encoder) {
+        LOG_ERROR("Failed to initialize hardware encoder");
+        return false;
+    }
+
+    // Set keyframe callback now that encoder exists
     m_control->set_keyframe_callback([this]() {
         LOG_INFO("Keyframe requested by client");
         m_encoder->request_keyframe();
     });
 
-    LOG_INFO("Server initialized: %dx%d @ %d fps",
-             m_capture->get_width(), m_capture->get_height(), config.capture_fps);
+    const char* codec_names[] = {"AV1", "HEVC", "H.264"};
+    uint8_t actual_codec = m_encoder->get_codec_type();
+    const char* codec_name = (actual_codec < 3) ? codec_names[actual_codec] : "unknown";
+
+    printf("Encoder: %s %s | %d FPS | %d kbps\n",
+           m_encoder->get_name(), codec_name, fps, bitrate / 1000);
 
 #ifdef HAVE_OPUS
-    // Initialize audio (non-fatal if it fails)
-    if (config.audio_enabled) {
+    // Initialize audio if client wants it
+    m_audio_initialized = false;
+    if (m_config.audio_enabled) {
         if (init_audio()) {
-            LOG_INFO("Audio streaming enabled");
+            LOG_INFO("Audio streaming enabled (%d kbps)", m_config.audio_bitrate / 1000);
         } else {
             LOG_WARN("Audio streaming disabled (initialization failed)");
         }
-    } else {
-        LOG_INFO("Audio streaming disabled by configuration");
     }
 #endif
 
@@ -182,12 +255,19 @@ void Server::run() {
     while (m_running) {
         LOG_INFO("Waiting for client connection...");
 
-        // Wait for client to connect
+        // Wait for client to connect and send its config
         ClientInfo client_info;
         if (!m_control->accept_client(client_info)) {
             if (!m_running) break;
             LOG_ERROR("Failed to accept client");
             std::this_thread::sleep_for(std::chrono::seconds(1));
+            continue;
+        }
+
+        // Initialize encoder and audio based on client preferences
+        if (!init_encoder_from_client(client_info)) {
+            LOG_ERROR("Failed to initialize encoder with client config");
+            m_control->reset();
             continue;
         }
 
@@ -248,13 +328,15 @@ void Server::run() {
 
             // Check if it's time for next frame
             if (now >= next_frame) {
-                capture_and_encode_loop();
-                next_frame += frame_interval;
-
-                // If we're behind, skip frames
-                if (next_frame < now) {
-                    next_frame = now + frame_interval;
+                if (capture_and_encode_loop()) {
+                    next_frame += frame_interval;
+                    // If we're behind, reset to now
+                    if (next_frame < now) {
+                        next_frame = now + frame_interval;
+                    }
                 }
+                // If capture failed (no new frame from PipeWire), don't advance
+                // — we'll try again on next iteration
             }
 
             // Calculate time until next frame and sleep smartly
@@ -296,6 +378,14 @@ void Server::run() {
             if (m_uinput && m_uinput->is_initialized()) {
                 m_uinput->reset_all();
             }
+            // Release encoder so next client can reconfigure
+            m_encoder.reset();
+#ifdef HAVE_OPUS
+            m_opus_encoder.reset();
+            m_audio_sender.reset();
+            m_audio_capture.reset();
+            m_audio_initialized = false;
+#endif
             m_control->reset();
             m_input_receiver->reset();
         }
@@ -304,7 +394,7 @@ void Server::run() {
     LOG_INFO("Server stopped");
 }
 
-void Server::capture_and_encode_loop() {
+bool Server::capture_and_encode_loop() {
     static auto last_timing_log = std::chrono::high_resolution_clock::now();
     static int capture_fail_count = 0;
     static int encode_fail_count = 0;
@@ -319,7 +409,7 @@ void Server::capture_and_encode_loop() {
     CapturedFrame frame;
     if (!m_capture->capture_frame(frame)) {
         capture_fail_count++;
-        return;
+        return false;
     }
 
     auto t1 = std::chrono::high_resolution_clock::now();
@@ -329,7 +419,7 @@ void Server::capture_and_encode_loop() {
     if (!m_encoder->encode(frame.data, frame.width, frame.height, frame.stride,
                            frame.timestamp_us, encoded)) {
         encode_fail_count++;
-        return;  // Encoder not ready yet or error
+        return false;
     }
 
     auto t2 = std::chrono::high_resolution_clock::now();
@@ -366,6 +456,7 @@ void Server::capture_and_encode_loop() {
                   m_frame_count, encoded.data.size(), encoded.is_keyframe, sent);
     }
     m_frame_count++;
+    return true;
 }
 
 void Server::handle_input(const InputEvent& event) {

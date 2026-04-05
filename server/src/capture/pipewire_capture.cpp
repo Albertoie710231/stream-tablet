@@ -62,47 +62,38 @@ PipeWireCapture::~PipeWireCapture() {
 bool PipeWireCapture::init(const char* /*display_name*/) {
     LOG_INFO("Initializing PipeWire capture via xdg-desktop-portal...");
 
-    // Initialize PipeWire library
     pw_init(nullptr, nullptr);
-
-    // Initialize stream events struct
     init_stream_events();
 
-    // Initialize D-Bus and portal
     if (!init_dbus()) {
         LOG_ERROR("Failed to initialize D-Bus connection");
         return false;
     }
 
-    // Create screencast session
     if (!create_session()) {
         LOG_ERROR("Failed to create screencast session");
         cleanup_portal();
         return false;
     }
 
-    // Select source (screen/window)
     if (!select_sources()) {
         LOG_ERROR("Failed to select sources");
         cleanup_portal();
         return false;
     }
 
-    // Start capture and get PipeWire node
     if (!start_capture()) {
         LOG_ERROR("Failed to start capture");
         cleanup_portal();
         return false;
     }
 
-    // Initialize PipeWire
     if (!init_pipewire()) {
         LOG_ERROR("Failed to initialize PipeWire");
         cleanup_portal();
         return false;
     }
 
-    // Connect to the stream
     if (!connect_stream(m_pipewire_node)) {
         LOG_ERROR("Failed to connect to PipeWire stream");
         cleanup_pipewire();
@@ -110,10 +101,9 @@ bool PipeWireCapture::init(const char* /*display_name*/) {
         return false;
     }
 
-    // Wait for stream to become ready and get dimensions
-    int timeout = 50;  // 5 seconds
+    // Wait for stream to become ready
+    int timeout = 50;
     while (!m_stream_ready && timeout > 0) {
-        // Process PipeWire events
         pw_loop_iterate(pw_main_loop_get_loop(m_pw_loop), 100);
         timeout--;
     }
@@ -125,9 +115,7 @@ bool PipeWireCapture::init(const char* /*display_name*/) {
         return false;
     }
 
-    // Allocate frame buffer
     m_frame_buffer.resize(static_cast<size_t>(m_width) * m_height * 4);
-
     m_initialized = true;
     LOG_INFO("PipeWire capture initialized: %dx%d", m_width, m_height);
     return true;
@@ -146,36 +134,44 @@ bool PipeWireCapture::capture_frame(CapturedFrame& frame) {
         return false;
     }
 
-    // Process PipeWire events (non-blocking)
+    // Process PipeWire events — this triggers on_stream_process callbacks
+    // which copy frames into slots. Single non-blocking iteration.
     pw_loop_iterate(pw_main_loop_get_loop(m_pw_loop), 0);
 
-    // Wait for a frame with timeout
-    std::unique_lock<std::mutex> lock(m_frame_mutex);
-    if (!m_frame_ready) {
-        // Process more events while waiting
-        lock.unlock();
-        for (int i = 0; i < 10 && !m_frame_ready; i++) {
-            pw_loop_iterate(pw_main_loop_get_loop(m_pw_loop), 10);
+    if (!m_has_new_frame.load(std::memory_order_acquire)) {
+        // No frame yet, do one short blocking iteration
+        pw_loop_iterate(pw_main_loop_get_loop(m_pw_loop), 2);
+        if (!m_has_new_frame.load(std::memory_order_acquire)) {
+            return false;
         }
-        lock.lock();
     }
 
-    if (!m_frame_ready) {
-        return false;
+    // Read from the slot that was last written
+    int read_slot = 1 - m_write_slot;
+    auto& slot = m_slots[read_slot];
+    if (!slot.ready) {
+        // Write slot might be the ready one (only one frame so far)
+        read_slot = m_write_slot;
+        auto& ws = m_slots[read_slot];
+        if (!ws.ready) return false;
+        frame.data = ws.data.data();
+        frame.stride = ws.stride;
+        frame.timestamp_us = ws.timestamp;
+    } else {
+        frame.data = slot.data.data();
+        frame.stride = slot.stride;
+        frame.timestamp_us = slot.timestamp;
     }
 
-    // Copy frame data
-    frame.data = m_frame_buffer.data();
     frame.width = m_width;
     frame.height = m_height;
-    frame.stride = m_width * 4;
-    frame.timestamp_us = m_frame_timestamp;
-    m_frame_ready = false;
+    m_has_new_frame.store(false, std::memory_order_release);
 
     return true;
 }
 
-// D-Bus initialization
+// ---- D-Bus / Portal methods (unchanged) ----
+
 bool PipeWireCapture::init_dbus() {
     GError* error = nullptr;
 
@@ -203,13 +199,10 @@ bool PipeWireCapture::init_dbus() {
         return false;
     }
 
-    // Generate a unique token for request handling
     m_request_token = "stream_tablet_" + std::to_string(getpid());
-
     return true;
 }
 
-// Helper to wait for portal response
 static GVariant* wait_for_response(GDBusConnection* conn, const char* request_path, int timeout_ms) {
     GVariant* result = nullptr;
     bool got_response = false;
@@ -230,28 +223,18 @@ static GVariant* wait_for_response(GDBusConnection* conn, const char* request_pa
     std::pair<GVariant**, bool*> callback_data = {&result, &got_response};
 
     guint signal_id = g_dbus_connection_signal_subscribe(
-        conn,
-        PORTAL_BUS_NAME,
-        REQUEST_INTERFACE,
-        "Response",
-        request_path,
-        nullptr,
-        G_DBUS_SIGNAL_FLAGS_NO_MATCH_RULE,
-        callback,
-        &callback_data,
-        nullptr
+        conn, PORTAL_BUS_NAME, REQUEST_INTERFACE, "Response",
+        request_path, nullptr, G_DBUS_SIGNAL_FLAGS_NO_MATCH_RULE,
+        callback, &callback_data, nullptr
     );
 
-    // Wait for response
     GMainContext* context = g_main_context_default();
     auto start = std::chrono::steady_clock::now();
     while (!got_response) {
         g_main_context_iteration(context, FALSE);
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - start).count();
-        if (elapsed > timeout_ms) {
-            break;
-        }
+        if (elapsed > timeout_ms) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
@@ -270,13 +253,9 @@ bool PipeWireCapture::create_session() {
                           g_variant_new_string(m_request_token.c_str()));
 
     GVariant* ret = g_dbus_proxy_call_sync(
-        m_portal_proxy,
-        "CreateSession",
+        m_portal_proxy, "CreateSession",
         g_variant_new("(a{sv})", &options),
-        G_DBUS_CALL_FLAGS_NONE,
-        -1,
-        nullptr,
-        &error
+        G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &error
     );
 
     if (!ret) {
@@ -290,14 +269,12 @@ bool PipeWireCapture::create_session() {
     std::string req_path = request_path;
     g_variant_unref(ret);
 
-    // Wait for response
     GVariant* response = wait_for_response(m_dbus_conn, req_path.c_str(), 30000);
     if (!response) {
         LOG_ERROR("CreateSession timed out or was denied");
         return false;
     }
 
-    // Get session handle from response
     const char* session_handle;
     if (g_variant_lookup(response, "session_handle", "&s", &session_handle)) {
         m_session_handle = session_handle;
@@ -315,24 +292,17 @@ bool PipeWireCapture::select_sources() {
     g_variant_builder_init(&options, G_VARIANT_TYPE("a{sv}"));
     g_variant_builder_add(&options, "{sv}", "handle_token",
                           g_variant_new_string(m_request_token.c_str()));
-    // types: 1=monitor, 2=window, 4=virtual
     g_variant_builder_add(&options, "{sv}", "types",
-                          g_variant_new_uint32(1));  // Monitor only
-    // multiple: allow multiple sources
+                          g_variant_new_uint32(1));
     g_variant_builder_add(&options, "{sv}", "multiple",
                           g_variant_new_boolean(FALSE));
-    // cursor_mode: 1=hidden, 2=embedded, 4=metadata
     g_variant_builder_add(&options, "{sv}", "cursor_mode",
-                          g_variant_new_uint32(2));  // Embedded in stream
+                          g_variant_new_uint32(2));
 
     GVariant* ret = g_dbus_proxy_call_sync(
-        m_portal_proxy,
-        "SelectSources",
+        m_portal_proxy, "SelectSources",
         g_variant_new("(oa{sv})", m_session_handle.c_str(), &options),
-        G_DBUS_CALL_FLAGS_NONE,
-        -1,
-        nullptr,
-        &error
+        G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &error
     );
 
     if (!ret) {
@@ -346,7 +316,6 @@ bool PipeWireCapture::select_sources() {
     std::string req_path = request_path;
     g_variant_unref(ret);
 
-    // Wait for user to select source (longer timeout for user interaction)
     GVariant* response = wait_for_response(m_dbus_conn, req_path.c_str(), 120000);
     if (!response) {
         LOG_ERROR("SelectSources timed out or was cancelled");
@@ -367,13 +336,9 @@ bool PipeWireCapture::start_capture() {
                           g_variant_new_string(m_request_token.c_str()));
 
     GVariant* ret = g_dbus_proxy_call_sync(
-        m_portal_proxy,
-        "Start",
+        m_portal_proxy, "Start",
         g_variant_new("(osa{sv})", m_session_handle.c_str(), "", &options),
-        G_DBUS_CALL_FLAGS_NONE,
-        -1,
-        nullptr,
-        &error
+        G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &error
     );
 
     if (!ret) {
@@ -387,14 +352,12 @@ bool PipeWireCapture::start_capture() {
     std::string req_path = request_path;
     g_variant_unref(ret);
 
-    // Wait for response
     GVariant* response = wait_for_response(m_dbus_conn, req_path.c_str(), 30000);
     if (!response) {
         LOG_ERROR("Start timed out or was denied");
         return false;
     }
 
-    // Extract PipeWire node ID from streams
     GVariant* streams;
     if (g_variant_lookup(response, "streams", "@a(ua{sv})", &streams)) {
         GVariantIter iter;
@@ -410,21 +373,14 @@ bool PipeWireCapture::start_capture() {
         g_variant_unref(streams);
     }
 
-    // Get PipeWire fd
     GUnixFDList* fd_list = nullptr;
     GVariantBuilder opt_builder;
     g_variant_builder_init(&opt_builder, G_VARIANT_TYPE("a{sv}"));
 
     GVariant* fd_ret = g_dbus_proxy_call_with_unix_fd_list_sync(
-        m_portal_proxy,
-        "OpenPipeWireRemote",
+        m_portal_proxy, "OpenPipeWireRemote",
         g_variant_new("(oa{sv})", m_session_handle.c_str(), &opt_builder),
-        G_DBUS_CALL_FLAGS_NONE,
-        -1,
-        nullptr,
-        &fd_list,
-        nullptr,
-        &error
+        G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &fd_list, nullptr, &error
     );
 
     if (!fd_ret) {
@@ -488,9 +444,7 @@ bool PipeWireCapture::init_pipewire() {
         return false;
     }
 
-    // Take ownership of fd
     m_pipewire_fd = -1;
-
     return true;
 }
 
@@ -508,21 +462,19 @@ bool PipeWireCapture::connect_stream(uint32_t node_id) {
         return false;
     }
 
-    // Hook for stream events
     static struct spa_hook stream_listener;
     pw_stream_add_listener(m_pw_stream, &stream_listener, &stream_events, this);
 
-    // Build format params - request BGRx or RGBx
     uint8_t buffer[1024];
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
 
-    // Pre-declare spa_rectangle and spa_fraction values to avoid taking address of rvalues
     struct spa_rectangle size_default = SPA_RECTANGLE(1920, 1080);
     struct spa_rectangle size_min = SPA_RECTANGLE(1, 1);
     struct spa_rectangle size_max = SPA_RECTANGLE(8192, 8192);
-    struct spa_fraction framerate_default = SPA_FRACTION(60, 1);
+    uint32_t target_fps = static_cast<uint32_t>(m_target_fps);
+    struct spa_fraction framerate_default = SPA_FRACTION(target_fps, 1);
     struct spa_fraction framerate_min = SPA_FRACTION(0, 1);
-    struct spa_fraction framerate_max = SPA_FRACTION(144, 1);
+    struct spa_fraction framerate_max = SPA_FRACTION(240, 1);
 
     const struct spa_pod* params[1];
     params[0] = static_cast<const struct spa_pod*>(spa_pod_builder_add_object(&b,
@@ -545,12 +497,9 @@ bool PipeWireCapture::connect_stream(uint32_t node_id) {
             &framerate_max)));
 
     int ret = pw_stream_connect(
-        m_pw_stream,
-        PW_DIRECTION_INPUT,
-        node_id,
+        m_pw_stream, PW_DIRECTION_INPUT, node_id,
         static_cast<enum pw_stream_flags>(
-            PW_STREAM_FLAG_AUTOCONNECT |
-            PW_STREAM_FLAG_MAP_BUFFERS
+            PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS
         ),
         params, 1
     );
@@ -560,7 +509,7 @@ bool PipeWireCapture::connect_stream(uint32_t node_id) {
         return false;
     }
 
-    LOG_INFO("Connected to PipeWire stream, node %u", node_id);
+    LOG_INFO("Connected to PipeWire stream, node %u, target %d fps", node_id, m_target_fps);
     return true;
 }
 
@@ -603,9 +552,7 @@ void PipeWireCapture::on_stream_state_changed(int old_state, int state,
 
 void PipeWireCapture::on_stream_param_changed(uint32_t id, const void* param_ptr) {
     const struct spa_pod* param = static_cast<const struct spa_pod*>(param_ptr);
-    if (!param || id != SPA_PARAM_Format) {
-        return;
-    }
+    if (!param || id != SPA_PARAM_Format) return;
 
     struct spa_video_info_raw info;
     if (spa_format_video_raw_parse(param, &info) < 0) {
@@ -621,15 +568,12 @@ void PipeWireCapture::on_stream_param_changed(uint32_t id, const void* param_ptr
              m_width, m_height, m_format,
              spa_debug_type_find_name(spa_type_video_format, m_format));
 
-    // Resize buffer
     m_frame_buffer.resize(static_cast<size_t>(m_width) * m_height * 4);
 }
 
 void PipeWireCapture::on_stream_process() {
     struct pw_buffer* b = pw_stream_dequeue_buffer(m_pw_stream);
-    if (!b) {
-        return;
-    }
+    if (!b) return;
 
     struct spa_buffer* buf = b->buffer;
     struct spa_data* d = &buf->datas[0];
@@ -639,38 +583,55 @@ void PipeWireCapture::on_stream_process() {
         return;
     }
 
-    // Get timestamp
     auto now = std::chrono::high_resolution_clock::now();
     uint64_t timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
         now.time_since_epoch()).count();
 
-    // Convert and copy frame
     const uint8_t* src = static_cast<const uint8_t*>(d->data);
     int stride = d->chunk->stride ? d->chunk->stride : m_width * 4;
 
-    convert_frame(src, m_format, m_width, m_height, stride);
+    // Copy into the current write slot
+    auto& slot = m_slots[m_write_slot];
 
-    // Signal frame ready
-    {
-        std::lock_guard<std::mutex> lock(m_frame_mutex);
-        m_frame_timestamp = timestamp;
-        m_frame_ready = true;
+    if (m_format == SPA_VIDEO_FORMAT_BGRA || m_format == SPA_VIDEO_FORMAT_BGRx) {
+        size_t frame_size = static_cast<size_t>(m_height) * stride;
+        if (slot.data.size() != frame_size) {
+            slot.data.resize(frame_size);
+        }
+        memcpy(slot.data.data(), src, frame_size);
+        slot.stride = stride;
+    } else {
+        size_t dst_size = static_cast<size_t>(m_width) * m_height * 4;
+        if (slot.data.size() != dst_size) {
+            slot.data.resize(dst_size);
+        }
+        // Use slot data as destination for conversion
+        auto saved = std::move(m_frame_buffer);
+        m_frame_buffer = std::move(slot.data);
+        convert_frame(src, m_format, m_width, m_height, stride);
+        slot.data = std::move(m_frame_buffer);
+        m_frame_buffer = std::move(saved);
+        slot.stride = m_width * 4;
     }
-    m_frame_cv.notify_one();
+
+    slot.timestamp = timestamp;
+    slot.ready = true;
+
+    // Flip write slot for next frame
+    m_write_slot = 1 - m_write_slot;
+    m_has_new_frame.store(true, std::memory_order_release);
 
     pw_stream_queue_buffer(m_pw_stream, b);
 }
 
 void PipeWireCapture::convert_frame(const uint8_t* src, uint32_t src_format,
                                      int width, int height, int stride) {
-    // Convert to BGRA format (what the encoder expects)
     uint8_t* dst = m_frame_buffer.data();
     int dst_stride = width * 4;
 
     switch (src_format) {
         case SPA_VIDEO_FORMAT_BGRx:
         case SPA_VIDEO_FORMAT_BGRA:
-            // Already BGRA, just copy with potential stride adjustment
             if (stride == dst_stride) {
                 memcpy(dst, src, static_cast<size_t>(height) * dst_stride);
             } else {
@@ -678,7 +639,6 @@ void PipeWireCapture::convert_frame(const uint8_t* src, uint32_t src_format,
                     memcpy(dst + y * dst_stride, src + y * stride, dst_stride);
                 }
             }
-            // Set alpha to 255 for BGRx
             if (src_format == SPA_VIDEO_FORMAT_BGRx) {
                 for (int i = 3; i < width * height * 4; i += 4) {
                     dst[i] = 255;
@@ -688,29 +648,27 @@ void PipeWireCapture::convert_frame(const uint8_t* src, uint32_t src_format,
 
         case SPA_VIDEO_FORMAT_RGBx:
         case SPA_VIDEO_FORMAT_RGBA:
-            // Swap R and B channels
             for (int y = 0; y < height; y++) {
                 const uint8_t* s = src + y * stride;
                 uint8_t* d = dst + y * dst_stride;
                 for (int x = 0; x < width; x++) {
-                    d[x*4 + 0] = s[x*4 + 2];  // B <- R
-                    d[x*4 + 1] = s[x*4 + 1];  // G <- G
-                    d[x*4 + 2] = s[x*4 + 0];  // R <- B
+                    d[x*4 + 0] = s[x*4 + 2];
+                    d[x*4 + 1] = s[x*4 + 1];
+                    d[x*4 + 2] = s[x*4 + 0];
                     d[x*4 + 3] = (src_format == SPA_VIDEO_FORMAT_RGBA) ? s[x*4 + 3] : 255;
                 }
             }
             break;
 
         case SPA_VIDEO_FORMAT_xBGR:
-            // xBGR to BGRA: shift bytes
             for (int y = 0; y < height; y++) {
                 const uint8_t* s = src + y * stride;
                 uint8_t* d = dst + y * dst_stride;
                 for (int x = 0; x < width; x++) {
-                    d[x*4 + 0] = s[x*4 + 1];  // B
-                    d[x*4 + 1] = s[x*4 + 2];  // G
-                    d[x*4 + 2] = s[x*4 + 3];  // R
-                    d[x*4 + 3] = 255;          // A
+                    d[x*4 + 0] = s[x*4 + 1];
+                    d[x*4 + 1] = s[x*4 + 2];
+                    d[x*4 + 2] = s[x*4 + 3];
+                    d[x*4 + 3] = 255;
                 }
             }
             break;
@@ -725,6 +683,39 @@ void PipeWireCapture::convert_frame(const uint8_t* src, uint32_t src_format,
                 }
             }
             break;
+    }
+}
+
+void PipeWireCapture::set_framerate(int fps) {
+    if (fps < 1) fps = 1;
+    if (fps > 240) fps = 240;
+    if (fps == m_target_fps) return;
+
+    LOG_INFO("Changing PipeWire target framerate: %d -> %d", m_target_fps, fps);
+    m_target_fps = fps;
+
+    if (m_pw_stream) {
+        pw_stream_disconnect(m_pw_stream);
+        pw_stream_destroy(m_pw_stream);
+        m_pw_stream = nullptr;
+        m_stream_ready = false;
+
+        if (!connect_stream(m_pipewire_node)) {
+            LOG_ERROR("Failed to reconnect stream with new framerate");
+            return;
+        }
+
+        int timeout = 50;
+        while (!m_stream_ready && timeout > 0) {
+            pw_loop_iterate(pw_main_loop_get_loop(m_pw_loop), 100);
+            timeout--;
+        }
+
+        if (m_stream_ready) {
+            LOG_INFO("PipeWire stream reconnected at %d fps", fps);
+        } else {
+            LOG_WARN("PipeWire stream reconnect timed out");
+        }
     }
 }
 

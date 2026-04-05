@@ -1,12 +1,10 @@
 #pragma once
 
 #include "capture_backend.hpp"
-#include <memory>
 #include <string>
 #include <vector>
 #include <atomic>
 #include <mutex>
-#include <condition_variable>
 
 // Forward declarations - use void* to avoid including PipeWire/GLib headers
 struct pw_main_loop;
@@ -24,24 +22,16 @@ public:
     PipeWireCapture();
     ~PipeWireCapture() override;
 
-    // Initialize capture (display_name is ignored for PipeWire)
     bool init(const char* display_name = nullptr) override;
-
-    // Shutdown and cleanup
     void shutdown() override;
-
-    // Capture a frame (blocking)
     bool capture_frame(CapturedFrame& frame) override;
 
-    // Get screen dimensions
     int get_width() const override { return m_width; }
     int get_height() const override { return m_height; }
-
-    // Check if initialized
     bool is_initialized() const override { return m_initialized; }
-
-    // Backend name
     const char* get_name() const override { return "PipeWire"; }
+
+    void set_framerate(int fps) override;
 
     // PipeWire callbacks (public for C callback access)
     void on_stream_state_changed(int old_state, int state, const char* error);
@@ -49,19 +39,16 @@ public:
     void on_stream_process();
 
 private:
-    // Portal D-Bus methods
     bool init_dbus();
     bool create_session();
     bool select_sources();
     bool start_capture();
     void cleanup_portal();
 
-    // PipeWire methods
     bool init_pipewire();
     bool connect_stream(uint32_t node_id);
     void cleanup_pipewire();
 
-    // Buffer conversion
     void convert_frame(const uint8_t* src, uint32_t src_format,
                        int width, int height, int stride);
 
@@ -79,17 +66,23 @@ private:
     struct pw_core* m_pw_core = nullptr;
     struct pw_stream* m_pw_stream = nullptr;
 
-    // Frame buffer
-    std::vector<uint8_t> m_frame_buffer;
-    std::mutex m_frame_mutex;
-    std::condition_variable m_frame_cv;
-    bool m_frame_ready = false;
-    uint64_t m_frame_timestamp = 0;
+    // Double-buffer: on_stream_process writes to latest, capture_frame reads it
+    std::vector<uint8_t> m_frame_buffer;  // for format conversion fallback
+    struct FrameSlot {
+        std::vector<uint8_t> data;
+        int stride = 0;
+        uint64_t timestamp = 0;
+        bool ready = false;
+    };
+    FrameSlot m_slots[2];
+    int m_write_slot = 0;
+    std::atomic<bool> m_has_new_frame{false};
 
     // Dimensions and format
     int m_width = 0;
     int m_height = 0;
     uint32_t m_format = 0;
+    int m_target_fps = 60;
 
     std::atomic<bool> m_initialized{false};
     std::atomic<bool> m_stream_ready{false};
