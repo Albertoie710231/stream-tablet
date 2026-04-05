@@ -76,6 +76,7 @@ private:
     };
     FrameSlot m_slots[2];
     int m_write_slot = 0;
+    int m_last_read_slot = -1;
     std::atomic<bool> m_has_new_frame{false};
 
     // Dimensions and format

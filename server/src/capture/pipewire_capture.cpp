@@ -134,38 +134,35 @@ bool PipeWireCapture::capture_frame(CapturedFrame& frame) {
         return false;
     }
 
-    // Process PipeWire events — this triggers on_stream_process callbacks
-    // which copy frames into slots. Single non-blocking iteration.
+    // Process PipeWire events — triggers on_stream_process if a frame arrived
     pw_loop_iterate(pw_main_loop_get_loop(m_pw_loop), 0);
 
     if (!m_has_new_frame.load(std::memory_order_acquire)) {
-        // No frame yet, do one short blocking iteration
         pw_loop_iterate(pw_main_loop_get_loop(m_pw_loop), 2);
-        if (!m_has_new_frame.load(std::memory_order_acquire)) {
-            return false;
-        }
     }
 
-    // Read from the slot that was last written
-    int read_slot = 1 - m_write_slot;
-    auto& slot = m_slots[read_slot];
-    if (!slot.ready) {
-        // Write slot might be the ready one (only one frame so far)
-        read_slot = m_write_slot;
-        auto& ws = m_slots[read_slot];
-        if (!ws.ready) return false;
-        frame.data = ws.data.data();
-        frame.stride = ws.stride;
-        frame.timestamp_us = ws.timestamp;
-    } else {
-        frame.data = slot.data.data();
-        frame.stride = slot.stride;
-        frame.timestamp_us = slot.timestamp;
+    if (m_has_new_frame.load(std::memory_order_acquire)) {
+        // New frame arrived — update read slot
+        m_last_read_slot = 1 - m_write_slot;
+        m_has_new_frame.store(false, std::memory_order_release);
     }
 
+    // Return last known good frame (re-encode if static — compresses to almost nothing)
+    if (m_last_read_slot < 0) {
+        return false;  // No frame ever received
+    }
+
+    auto& slot = m_slots[m_last_read_slot];
+    if (slot.data.empty()) {
+        return false;
+    }
+
+    frame.data = slot.data.data();
+    frame.stride = slot.stride;
     frame.width = m_width;
     frame.height = m_height;
-    m_has_new_frame.store(false, std::memory_order_release);
+    frame.timestamp_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::high_resolution_clock::now().time_since_epoch()).count();
 
     return true;
 }
