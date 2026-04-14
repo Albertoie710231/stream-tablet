@@ -302,6 +302,14 @@ void Server::run() {
 #ifdef HAVE_OPUS
         // Set audio destination and start audio capture
         if (m_audio_initialized && m_audio_sender && m_audio_capture) {
+            // If the client requested exclusive audio, route everything through
+            // a null sink BEFORE starting capture — then the audio backend's
+            // default-monitor connection picks up the null sink's monitor
+            // instead of the real speakers.
+            if (client_info.audio_enabled && client_info.audio_exclusive) {
+                m_audio_router.begin();
+            }
+
             m_audio_sender->set_client(client_info.host, m_config.audio_port);
             m_audio_sequence = 0;
             m_audio_capture->start([this](const AudioFrame& frame) {
@@ -391,6 +399,8 @@ void Server::run() {
                 m_audio_capture->stop();
                 LOG_INFO("Audio capture stopped");
             }
+            // Restore the system default sink and unload the null sink.
+            m_audio_router.end();
 #endif
             // Release all pressed buttons/tools before resetting
             if (m_uinput && m_uinput->is_initialized()) {

@@ -14,6 +14,7 @@
 
 #ifdef HAVE_OPUS
 #include "audio/audio_backend.hpp"
+#include "audio/audio_router.hpp"
 #include "audio/opus_encoder.hpp"
 #include "network/audio_sender.hpp"
 #endif
@@ -72,6 +73,7 @@ private:
     std::unique_ptr<AudioBackend> m_audio_capture;
     std::unique_ptr<OpusEncoder> m_opus_encoder;
     std::unique_ptr<AudioSender> m_audio_sender;
+    AudioRouter m_audio_router;
     bool m_audio_initialized = false;
     uint32_t m_audio_sequence = 0;
     std::mutex m_audio_mutex;

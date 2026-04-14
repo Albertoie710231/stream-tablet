@@ -115,6 +115,7 @@ class MainActivity : AppCompatActivity() {
         val bitrate = if (bitrateText.isEmpty() || bitrateText == "0") 0 else (bitrateText.toIntOrNull() ?: 0) * 1000  // UI shows kbps, protocol uses bps
         val pacing = binding.pacingSpinner.selectedItemPosition
         val audioEnabled = binding.audioSwitch.isChecked
+        val audioExclusive = binding.audioExclusiveSwitch.isChecked
         val audioBitrate = binding.audioBitrateEdit.text.toString().toIntOrNull()?.times(1000) ?: 128000
 
         val intent = Intent(this, StreamActivity::class.java).apply {
@@ -128,6 +129,7 @@ class MainActivity : AppCompatActivity() {
             putExtra(StreamActivity.EXTRA_BITRATE, bitrate)
             putExtra(StreamActivity.EXTRA_PACING, pacing)
             putExtra(StreamActivity.EXTRA_AUDIO_ENABLED, audioEnabled)
+            putExtra(StreamActivity.EXTRA_AUDIO_EXCLUSIVE, audioExclusive)
             putExtra(StreamActivity.EXTRA_AUDIO_BITRATE, audioBitrate)
         }
         startActivity(intent)

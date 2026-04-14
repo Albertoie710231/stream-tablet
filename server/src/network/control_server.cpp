@@ -179,7 +179,10 @@ bool ControlServer::accept_client(ClientInfo& out_info) {
         out_info.cqp = msg_data[11];
         out_info.bitrate = (msg_data[12] << 24) | (msg_data[13] << 16) | (msg_data[14] << 8) | msg_data[15];
         out_info.pacing_mode = msg_data[16];
-        out_info.audio_enabled = msg_data[17];
+        // audio_enabled byte: bit 0 = enabled, bit 1 = exclusive routing.
+        uint8_t audio_flags = msg_data[17];
+        out_info.audio_enabled = (audio_flags & 0x01) ? 1 : 0;
+        out_info.audio_exclusive = (audio_flags & 0x02) != 0;
         out_info.audio_bitrate = (msg_data[18] << 24) | (msg_data[19] << 16) | (msg_data[20] << 8) | msg_data[21];
     }
     out_info.host = m_client_host;

@@ -60,6 +60,7 @@ class ConnectionManager {
     var preferredBitrate: Int = 0     // 0=auto, bps
     var preferredPacing: Int = 0      // 0=auto, 1=none, 2=light, 3=aggressive, 4=keyframe
     var preferredAudioEnabled: Boolean = true
+    var preferredAudioExclusive: Boolean = true  // Mute PC speakers while streaming
     var preferredAudioBitrate: Int = 128000  // bps
 
     private var serverAddress: String = ""
@@ -329,7 +330,11 @@ class ConnectionManager {
         buffer.put(preferredCqp.toByte())
         buffer.putInt(preferredBitrate)
         buffer.put(preferredPacing.toByte())
-        buffer.put(if (preferredAudioEnabled) 1.toByte() else 0.toByte())
+        // bit 0 = audio enabled, bit 1 = exclusive (mute PC speakers)
+        var audioFlags = 0
+        if (preferredAudioEnabled) audioFlags = audioFlags or 0x01
+        if (preferredAudioEnabled && preferredAudioExclusive) audioFlags = audioFlags or 0x02
+        buffer.put(audioFlags.toByte())
         buffer.putInt(preferredAudioBitrate)
 
         controlOut?.write(buffer.array())

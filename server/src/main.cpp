@@ -1,5 +1,8 @@
 #include "server.hpp"
 #include "util/logger.hpp"
+#ifdef HAVE_OPUS
+#include "audio/audio_router.hpp"
+#endif
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
@@ -128,6 +131,12 @@ int main(int argc, char* argv[]) {
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
+
+#ifdef HAVE_OPUS
+    // If a previous run crashed, its null sink may still be loaded and
+    // holding the system default — clean it up before we start.
+    AudioRouter::cleanup_stale();
+#endif
 
     Server server;
     g_server = &server;

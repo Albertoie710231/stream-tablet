@@ -36,6 +36,7 @@ endif()
 if(HAVE_OPUS)
     list(APPEND SERVER_SOURCES
         src/audio/audio_backend.cpp
+        src/audio/audio_router.cpp
         src/audio/opus_encoder.cpp
         src/network/audio_sender.cpp
     )

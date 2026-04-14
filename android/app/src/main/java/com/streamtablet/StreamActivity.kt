@@ -43,6 +43,7 @@ class StreamActivity : AppCompatActivity() {
         const val EXTRA_BITRATE = "bitrate"
         const val EXTRA_PACING = "pacing"
         const val EXTRA_AUDIO_ENABLED = "audio_enabled"
+        const val EXTRA_AUDIO_EXCLUSIVE = "audio_exclusive"
         const val EXTRA_AUDIO_BITRATE = "audio_bitrate"
     }
 
@@ -120,6 +121,7 @@ class StreamActivity : AppCompatActivity() {
             preferredBitrate = intent.getIntExtra(EXTRA_BITRATE, 0)
             preferredPacing = intent.getIntExtra(EXTRA_PACING, 0)
             preferredAudioEnabled = intent.getBooleanExtra(EXTRA_AUDIO_ENABLED, true)
+            preferredAudioExclusive = intent.getBooleanExtra(EXTRA_AUDIO_EXCLUSIVE, true)
             preferredAudioBitrate = intent.getIntExtra(EXTRA_AUDIO_BITRATE, 128000)
         }
         calibrationManager = CalibrationManager(this)

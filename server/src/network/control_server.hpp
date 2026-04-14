@@ -24,6 +24,10 @@ struct ClientInfo {
     uint8_t pacing_mode = 0;   // 0=auto, 1=none, 2=light, 3=aggressive, 4=keyframe
     uint8_t audio_enabled = 1;
     uint32_t audio_bitrate = 128000;
+    // When true, all PC audio is routed into a null sink while the tablet
+    // is streaming so the PC speakers stay silent. Decoded from bit 1 of
+    // the handshake's audio_enabled byte (bit 0 = enabled, bit 1 = exclusive).
+    bool audio_exclusive = true;
 };
 
 class ControlServer {
