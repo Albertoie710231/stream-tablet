@@ -30,10 +30,16 @@ static void print_usage(const char* prog) {
     printf("Options:\n");
     printf("  -d, --display DISPLAY   X11 display (default: :0)\n");
     printf("  -c, --capture BACKEND   Capture backend: auto, x11, pipewire (default: auto)\n");
+    printf("  -o, --output NAME       Output to mirror, e.g., DP-3 (default: first output)\n");
+    printf("  -V, --virtual WxH       Create virtual output, e.g., 2800x1752\n");
     printf("  -p, --port PORT         Control port (default: 9500)\n");
     printf("  -v, --verbose           Enable info logging (use -vv for debug)\n");
     printf("  -h, --help              Show this help\n");
     printf("\nStreaming settings (codec, fps, quality, etc.) are configured from the tablet app.\n");
+    printf("\nExamples:\n");
+    printf("  %s                           # Mirror first output\n", prog);
+    printf("  %s -o DP-3                   # Mirror specific output\n", prog);
+    printf("  %s -V 2800x1752              # Create virtual output at tablet resolution\n", prog);
 }
 
 int main(int argc, char* argv[]) {
@@ -43,6 +49,8 @@ int main(int argc, char* argv[]) {
     static struct option long_options[] = {
         {"display", required_argument, 0, 'd'},
         {"capture", required_argument, 0, 'c'},
+        {"output", required_argument, 0, 'o'},
+        {"virtual", required_argument, 0, 'V'},
         {"port", required_argument, 0, 'p'},
         {"verbose", no_argument, 0, 'v'},
         {"help", no_argument, 0, 'h'},
@@ -52,7 +60,7 @@ int main(int argc, char* argv[]) {
     int verbosity = 0;
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "d:c:p:vh", long_options, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "d:c:o:V:p:vh", long_options, nullptr)) != -1) {
         switch (opt) {
             case 'd':
                 config.display = optarg;
@@ -70,6 +78,20 @@ int main(int argc, char* argv[]) {
                     return 1;
                 }
                 break;
+            case 'o':
+                config.output_name = optarg;
+                break;
+            case 'V': {
+                int w = 0, h = 0;
+                if (sscanf(optarg, "%dx%d", &w, &h) == 2 && w > 0 && h > 0) {
+                    config.virtual_width = w;
+                    config.virtual_height = h;
+                } else {
+                    fprintf(stderr, "Invalid virtual output size: %s (use WxH, e.g., 2800x1752)\n", optarg);
+                    return 1;
+                }
+                break;
+            }
             case 'p':
                 config.control_port = static_cast<uint16_t>(atoi(optarg));
                 config.video_port = config.control_port + 1;
@@ -88,21 +110,25 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Apply verbosity level: -v = INFO, -vv = DEBUG
     if (verbosity >= 2) {
         Logger::set_level(LogLevel::DEBUG);
     } else if (verbosity == 1) {
         Logger::set_level(LogLevel::INFO);
     }
 
-    printf("StreamTablet Server v1.1.0\n");
-    printf("Port: %d | Waiting for tablet to connect and configure stream...\n", config.control_port);
+    printf("StreamTablet Server v1.2.0\n");
+    if (config.virtual_width > 0) {
+        printf("Virtual output: %dx%d | Port: %d\n",
+               config.virtual_width, config.virtual_height, config.control_port);
+    } else if (!config.output_name.empty()) {
+        printf("Output: %s | Port: %d\n", config.output_name.c_str(), config.control_port);
+    } else {
+        printf("Port: %d | Waiting for tablet to connect...\n", config.control_port);
+    }
 
-    // Set up signal handlers
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    // Create and run server
     Server server;
     g_server = &server;
 

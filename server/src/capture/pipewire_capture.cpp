@@ -295,6 +295,16 @@ bool PipeWireCapture::select_sources() {
                           g_variant_new_boolean(FALSE));
     g_variant_builder_add(&options, "{sv}", "cursor_mode",
                           g_variant_new_uint32(2));
+    // Persist session: 2 = persist until explicitly revoked
+    g_variant_builder_add(&options, "{sv}", "persist_mode",
+                          g_variant_new_uint32(2));
+    // Restore previous session if we have a token (skips picker dialog)
+    load_restore_token();
+    if (!m_restore_token.empty()) {
+        g_variant_builder_add(&options, "{sv}", "restore_token",
+                              g_variant_new_string(m_restore_token.c_str()));
+        LOG_INFO("Using saved restore token (picker will be skipped)");
+    }
 
     GVariant* ret = g_dbus_proxy_call_sync(
         m_portal_proxy, "SelectSources",
@@ -353,6 +363,14 @@ bool PipeWireCapture::start_capture() {
     if (!response) {
         LOG_ERROR("Start timed out or was denied");
         return false;
+    }
+
+    // Save restore token for next run (skips picker)
+    const char* new_token = nullptr;
+    if (g_variant_lookup(response, "restore_token", "&s", &new_token) && new_token) {
+        m_restore_token = new_token;
+        save_restore_token();
+        LOG_INFO("Saved restore token for next run");
     }
 
     GVariant* streams;
@@ -683,12 +701,42 @@ void PipeWireCapture::convert_frame(const uint8_t* src, uint32_t src_format,
     }
 }
 
+void PipeWireCapture::load_restore_token() {
+    std::string path = std::string(getenv("HOME") ? getenv("HOME") : "/tmp") +
+                       "/.cache/stream-tablet-portal-token";
+    FILE* f = fopen(path.c_str(), "r");
+    if (f) {
+        char buf[512];
+        if (fgets(buf, sizeof(buf), f)) {
+            m_restore_token = buf;
+            // Strip newline
+            while (!m_restore_token.empty() && m_restore_token.back() == '\n')
+                m_restore_token.pop_back();
+        }
+        fclose(f);
+        LOG_INFO("Loaded restore token from %s", path.c_str());
+    }
+}
+
+void PipeWireCapture::save_restore_token() {
+    std::string path = std::string(getenv("HOME") ? getenv("HOME") : "/tmp") +
+                       "/.cache/stream-tablet-portal-token";
+    FILE* f = fopen(path.c_str(), "w");
+    if (f) {
+        fputs(m_restore_token.c_str(), f);
+        fclose(f);
+        LOG_INFO("Saved restore token to %s", path.c_str());
+    }
+}
+
 void PipeWireCapture::set_framerate(int fps) {
     if (fps < 1) fps = 1;
     if (fps > 240) fps = 240;
-    if (fps == m_target_fps) return;
 
-    LOG_INFO("Changing PipeWire target framerate: %d -> %d", m_target_fps, fps);
+    // Always reconnect: this is how we pick up resolution changes triggered
+    // externally (e.g. kscreen-doctor reconfiguring the virtual output), not
+    // just framerate changes.
+    LOG_INFO("Reconnecting PipeWire stream at %d fps", fps);
     m_target_fps = fps;
 
     if (m_pw_stream) {

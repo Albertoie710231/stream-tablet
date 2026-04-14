@@ -48,6 +48,10 @@ class ConnectionManager {
     private var inputSocket: Socket? = null
     private var inputOut: DataOutputStream? = null
 
+    // Tablet physical display (set before connect)
+    var tabletWidth: Int = 2800
+    var tabletHeight: Int = 1752
+
     // Streaming preferences (set before connect)
     var preferredCodec: Int = 0       // 0=auto, 1=av1, 2=hevc, 3=h264
     var preferredFps: Int = 60        // 1-120
@@ -312,9 +316,9 @@ class ConnectionManager {
         buffer.putShort(23) // length (type + 22 bytes data)
         buffer.put(0x03)    // MSG_CONFIG_REQUEST
 
-        // Tablet resolution (landscape)
-        buffer.putShort(2800)  // width
-        buffer.putShort(1752)  // height
+        // Tablet native resolution (from Display.getMode, landscape)
+        buffer.putShort(tabletWidth.toShort())
+        buffer.putShort(tabletHeight.toShort())
         buffer.putShort(videoSocket?.localPort?.toShort() ?: 0)
         buffer.putShort(0)     // input port (server will tell us)
 

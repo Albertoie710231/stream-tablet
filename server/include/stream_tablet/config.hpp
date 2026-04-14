@@ -25,6 +25,11 @@ struct ServerConfig {
     std::string display = ":0";
     int capture_fps = 60;
 
+    // PipeWire capture mode (Wayland only)
+    std::string output_name;     // Output to mirror (e.g., "DP-3"), empty = first
+    int virtual_width = 0;       // >0 = create virtual output instead of mirroring
+    int virtual_height = 0;
+
     // Encoding
     int bitrate = 15000000;  // 15 Mbps
     int gop_size = 60;       // Keyframe every 1 second at 60fps

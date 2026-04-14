@@ -14,6 +14,7 @@
 #endif
 
 #include "encoder/encoder_factory.hpp"
+#include "display/kwin_output.hpp"
 
 namespace stream_tablet {
 
@@ -75,7 +76,7 @@ bool Server::create_capture_backend(const char* display) {
 #ifdef HAVE_PIPEWIRE
             LOG_INFO("Creating PipeWire capture backend");
             m_capture = std::make_unique<PipeWireCapture>();
-            return m_capture->init(nullptr);  // PipeWire doesn't use display string
+            return m_capture->init(nullptr);
 #else
             LOG_ERROR("PipeWire capture not compiled in");
             return false;
@@ -264,6 +265,16 @@ void Server::run() {
             continue;
         }
 
+        // Reconfigure the KWin virtual output (created by the portal during
+        // Server::init) to match the tablet's native resolution and refresh
+        // rate. Must happen BEFORE init_encoder_from_client — that call
+        // reconnects the PipeWire stream via set_framerate(), which is what
+        // picks up the new dimensions from KWin.
+        if (client_info.width > 0 && client_info.height > 0 && client_info.fps > 0) {
+            apply_virtual_output_mode(client_info.width, client_info.height, client_info.fps);
+            save_display_mode(client_info.width, client_info.height, client_info.fps);
+        }
+
         // Initialize encoder and audio based on client preferences
         if (!init_encoder_from_client(client_info)) {
             LOG_ERROR("Failed to initialize encoder with client config");
@@ -299,6 +310,13 @@ void Server::run() {
             LOG_INFO("Audio capture started for client");
         }
 #endif
+
+        // Sync uinput to the (possibly resized) capture dimensions so the
+        // ABS touch/stylus range maps across the whole virtual output, not
+        // the stale 1920x1080 the devices were created with.
+        if (m_uinput && m_capture->get_width() > 0 && m_capture->get_height() > 0) {
+            m_uinput->set_screen_size(m_capture->get_width(), m_capture->get_height());
+        }
 
         // Initialize coordinate transform
         m_coord_transform.init(m_capture->get_width(), m_capture->get_height(),

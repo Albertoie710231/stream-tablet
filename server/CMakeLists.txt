@@ -9,6 +9,7 @@ set(SERVER_SOURCES
     src/network/input_receiver.cpp
     src/input/uinput_backend.cpp
     src/input/coord_transform.cpp
+    src/display/kwin_output.cpp
     src/security/tls_context.cpp
     src/util/event_loop.cpp
     src/util/logger.cpp
@@ -25,7 +26,10 @@ if(HAVE_X11)
 endif()
 
 if(HAVE_PIPEWIRE)
-    list(APPEND SERVER_SOURCES src/capture/pipewire_capture.cpp)
+    list(APPEND SERVER_SOURCES
+        src/capture/pipewire_capture.cpp
+        src/capture/wayland-protocols/zkde-screencast-unstable-v1.c
+    )
 endif()
 
 # Audio sources (requires Opus)
@@ -66,6 +70,7 @@ if(HAVE_PIPEWIRE)
     target_include_directories(stream_tablet_server PRIVATE
         ${PIPEWIRE_INCLUDE_DIRS}
         ${GIO_INCLUDE_DIRS}
+        ${WAYLAND_CLIENT_INCLUDE_DIRS}
     )
 endif()
 
@@ -96,6 +101,7 @@ if(HAVE_PIPEWIRE)
     target_link_libraries(stream_tablet_server PRIVATE
         ${PIPEWIRE_LIBRARIES}
         ${GIO_LIBRARIES}
+        ${WAYLAND_CLIENT_LIBRARIES}
     )
 endif()
 
@@ -118,6 +124,8 @@ if(HAVE_PIPEWIRE)
     # which requires -fpermissive in C++ and disabling -Wpedantic
     set_source_files_properties(src/capture/pipewire_capture.cpp
         PROPERTIES COMPILE_FLAGS "-Wno-pedantic -fpermissive")
+    set_source_files_properties(src/capture/wayland-protocols/zkde-screencast-unstable-v1.c
+        PROPERTIES COMPILE_FLAGS "-Wno-pedantic")
     if(HAVE_OPUS)
         set_source_files_properties(src/audio/pipewire_audio.cpp
             PROPERTIES COMPILE_FLAGS "-Wno-pedantic -fpermissive")

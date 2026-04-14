@@ -52,11 +52,16 @@ private:
     void convert_frame(const uint8_t* src, uint32_t src_format,
                        int width, int height, int stride);
 
+    // Portal session persistence
+    void load_restore_token();
+    void save_restore_token();
+
     // D-Bus / Portal state
     GDBusConnection* m_dbus_conn = nullptr;
     GDBusProxy* m_portal_proxy = nullptr;
     std::string m_session_handle;
     std::string m_request_token;
+    std::string m_restore_token;  // For skipping picker on subsequent runs
     uint32_t m_pipewire_node = 0;
     int m_pipewire_fd = -1;
 

@@ -19,6 +19,14 @@ public:
     // Initialize uinput devices (stylus + mouse + touch like Weylus)
     bool init(int screen_width, int screen_height);
 
+    // Update the screen size used to map coordinates into the ABS range.
+    // Call after the capture backend reports a new resolution (e.g. after
+    // kscreen-doctor reconfigures the virtual output).
+    void set_screen_size(int screen_width, int screen_height) {
+        m_screen_width = screen_width;
+        m_screen_height = screen_height;
+    }
+
     // Send stylus event (in_range=false when stylus goes out of proximity)
     void send_stylus(int x, int y, float pressure, float tilt_x, float tilt_y,
                      bool tip_down, bool button1, bool button2, bool eraser,

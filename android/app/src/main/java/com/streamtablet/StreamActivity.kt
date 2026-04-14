@@ -98,10 +98,23 @@ class StreamActivity : AppCompatActivity() {
         port = intent.getIntExtra(EXTRA_PORT, 9500)
         maintainAspectRatio = intent.getBooleanExtra(EXTRA_MAINTAIN_ASPECT_RATIO, true)
 
+        // Query the tablet's real physical display mode so the server can
+        // reconfigure the KWin virtual output to match. Landscape orientation:
+        // the streaming session always runs landscape, so we hand the server
+        // max(w,h) x min(w,h) regardless of current rotation.
+        val mode = windowManager.defaultDisplay.mode
+        val physW = mode.physicalWidth
+        val physH = mode.physicalHeight
+        val landscapeW = maxOf(physW, physH)
+        val landscapeH = minOf(physW, physH)
+        val nativeRefresh = mode.refreshRate.toInt().coerceIn(1, 240)
+
         // Initialize components
         connectionManager = ConnectionManager().apply {
+            tabletWidth = landscapeW
+            tabletHeight = landscapeH
             preferredCodec = intent.getIntExtra(EXTRA_CODEC, 0)
-            preferredFps = intent.getIntExtra(EXTRA_FPS, 60)
+            preferredFps = intent.getIntExtra(EXTRA_FPS, nativeRefresh)
             preferredQuality = intent.getIntExtra(EXTRA_QUALITY, 0)
             preferredCqp = intent.getIntExtra(EXTRA_CQP, 24)
             preferredBitrate = intent.getIntExtra(EXTRA_BITRATE, 0)
