@@ -552,4 +552,35 @@ class StreamActivity : AppCompatActivity() {
             hideSystemUI()
         }
     }
+
+    // Forward hardware keyboard events (USB/Bluetooth HID) to the server.
+    // Soft-keyboard characters go through the TextWatcher path instead; we
+    // filter those out by requiring a non-virtual input device.
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val device = event.device
+        val fromHardware = device != null && !device.isVirtual &&
+                (device.sources and android.view.InputDevice.SOURCE_KEYBOARD) != 0
+
+        if (fromHardware && isConnected) {
+            // Let Android keep handling volume / system keys.
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_VOLUME_UP,
+                KeyEvent.KEYCODE_VOLUME_DOWN,
+                KeyEvent.KEYCODE_VOLUME_MUTE,
+                KeyEvent.KEYCODE_POWER -> return super.dispatchKeyEvent(event)
+            }
+
+            when (event.action) {
+                KeyEvent.ACTION_DOWN -> {
+                    inputHandler.sendKeyEvent(event.keyCode, true)
+                    return true
+                }
+                KeyEvent.ACTION_UP -> {
+                    inputHandler.sendKeyEvent(event.keyCode, false)
+                    return true
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
 }
