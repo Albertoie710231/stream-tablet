@@ -106,6 +106,10 @@ bool Server::init(const ServerConfig& config) {
         return false;
     }
 
+    // Advertise the server on mDNS so the tablet can auto-discover it.
+    // Non-fatal if avahi isn't installed — user can still type the IP.
+    m_mdns.start(config.control_port);
+
     // Initialize video sender
     m_video_sender = std::make_unique<VideoSender>();
     if (!m_video_sender->init(config.video_port)) {

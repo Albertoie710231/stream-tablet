@@ -1,21 +1,33 @@
 package com.streamtablet
 
 import android.content.Intent
+import android.graphics.Color
 import android.os.Bundle
+import android.util.TypedValue
+import android.view.Gravity
+import android.view.LayoutInflater
 import android.view.View
+import android.view.ViewGroup
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import com.streamtablet.calibration.CalibrationActivity
 import com.streamtablet.calibration.CalibrationManager
 import com.streamtablet.databinding.ActivityMainBinding
+import com.streamtablet.discovery.DiscoveredServer
+import com.streamtablet.discovery.MdnsDiscovery
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private lateinit var calibrationManager: CalibrationManager
+    private lateinit var mdns: MdnsDiscovery
+    private val discovered = linkedMapOf<String, DiscoveredServer>()
 
     private val calibrationLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -60,7 +72,120 @@ class MainActivity : AppCompatActivity() {
         }
 
         updateCalibrationStatus()
+
+        mdns = MdnsDiscovery(this)
     }
+
+    override fun onStart() {
+        super.onStart()
+        discovered.clear()
+        refreshDiscoveredList()
+        mdns.start(object : MdnsDiscovery.Listener {
+            override fun onServerFound(server: DiscoveredServer) {
+                runOnUiThread {
+                    discovered[server.name] = server
+                    refreshDiscoveredList()
+                }
+            }
+            override fun onServerLost(name: String) {
+                runOnUiThread {
+                    discovered.remove(name)
+                    refreshDiscoveredList()
+                }
+            }
+        })
+    }
+
+    override fun onStop() {
+        super.onStop()
+        mdns.stop()
+    }
+
+    private fun refreshDiscoveredList() {
+        val list = binding.discoveredList
+        list.removeAllViews()
+        binding.discoveryProgress.visibility =
+            if (discovered.isEmpty()) View.VISIBLE else View.GONE
+
+        if (discovered.isEmpty()) {
+            val tv = TextView(this).apply {
+                text = "Searching local network…"
+                textSize = 13f
+                alpha = 0.6f
+                setPadding(0, dp(8), 0, dp(8))
+            }
+            list.addView(tv)
+            return
+        }
+
+        for ((_, server) in discovered) {
+            list.addView(buildServerRow(server))
+        }
+    }
+
+    private fun buildServerRow(server: DiscoveredServer): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            isClickable = true
+            isFocusable = true
+            val tv = TypedValue()
+            context.theme.resolveAttribute(
+                android.R.attr.selectableItemBackground, tv, true,
+            )
+            setBackgroundResource(tv.resourceId)
+            setOnClickListener {
+                binding.serverAddressEdit.setText(server.host)
+                binding.portEdit.setText(server.port.toString())
+                Toast.makeText(
+                    this@MainActivity,
+                    "Using ${server.name}",
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }
+        }
+
+        // Leading dot/indicator
+        val dot = View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(8), dp(8)).apply {
+                marginEnd = dp(12)
+            }
+            setBackgroundColor(Color.parseColor("#4CAF50"))
+        }
+        row.addView(dot)
+
+        val textCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f,
+            )
+        }
+        textCol.addView(TextView(this).apply {
+            text = server.name
+            textSize = 15f
+            setTextColor(Color.WHITE)
+        })
+        textCol.addView(TextView(this).apply {
+            text = "${server.host}:${server.port}"
+            textSize = 12f
+            alpha = 0.6f
+        })
+        row.addView(textCol)
+
+        val chevron = TextView(this).apply {
+            text = "›"
+            textSize = 22f
+            alpha = 0.5f
+            setPadding(dp(8), 0, 0, 0)
+        }
+        row.addView(chevron)
+
+        return row
+    }
+
+    private fun dp(v: Int): Int =
+        (v * resources.displayMetrics.density).toInt()
 
     private fun setupSpinners() {
         // Codec spinner

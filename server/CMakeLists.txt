@@ -5,6 +5,7 @@ set(SERVER_SOURCES
     src/encoder/encoder_factory.cpp
     src/encoder/vaapi_encoder.cpp
     src/network/control_server.cpp
+    src/network/mdns_publisher.cpp
     src/network/video_sender.cpp
     src/network/input_receiver.cpp
     src/input/uinput_backend.cpp

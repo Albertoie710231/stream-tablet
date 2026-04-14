@@ -7,6 +7,7 @@
 #include "capture/capture_backend.hpp"
 #include "encoder/encoder_backend.hpp"
 #include "network/control_server.hpp"
+#include "network/mdns_publisher.hpp"
 #include "network/video_sender.hpp"
 #include "network/input_receiver.hpp"
 #include "input/uinput_backend.hpp"
@@ -62,6 +63,7 @@ private:
     std::unique_ptr<CaptureBackend> m_capture;
     std::unique_ptr<EncoderBackend> m_encoder;
     std::unique_ptr<ControlServer> m_control;
+    MdnsPublisher m_mdns;
     std::unique_ptr<VideoSender> m_video_sender;
     std::unique_ptr<InputReceiver> m_input_receiver;
     std::unique_ptr<UInputBackend> m_uinput;
