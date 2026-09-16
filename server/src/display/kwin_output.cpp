@@ -77,6 +77,47 @@ bool has_mode(int id, int width, int height, int fps) {
     return false;
 }
 
+// Finds the mode id at the requested size whose refresh is closest to `fps`.
+// Returns false if the output advertises nothing at that size.
+//
+// This matters more than it looks. kscreen-doctor's "WxH@120" spec matches on
+// the rounded refresh, so it will happily select a 119.78Hz mode when a 119.99Hz
+// one exists. The tablet panel runs at 120.00001Hz, and a source/sink mismatch
+// of 0.22Hz means the panel needs one extra frame roughly every 4.5 seconds —
+// a repeated frame, felt as a periodic hitch no amount of pipeline smoothing can
+// remove. At 0.01Hz that interval stretches to about 100 seconds.
+bool find_closest_mode(int output_id, int width, int height, int fps,
+                       int& mode_id_out, double& refresh_out) {
+    std::string clean = strip_ansi(run_capture("kscreen-doctor -o 2>/dev/null"));
+    std::string needle = "Output: " + std::to_string(output_id) + " ";
+    auto pos = clean.find(needle);
+    if (pos == std::string::npos) return false;
+    auto end = clean.find("\nOutput: ", pos + 1);
+    std::string block = clean.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+
+    // Mode entries look like "19:2960x1848@119.78" with '*' marking the active one.
+    std::regex mode_re(R"((\d+):(\d+)x(\d+)@([0-9.]+))");
+    auto begin = std::sregex_iterator(block.begin(), block.end(), mode_re);
+    auto stop = std::sregex_iterator();
+
+    bool found = false;
+    double best_delta = 0.0;
+    for (auto it = begin; it != stop; ++it) {
+        int w = std::stoi((*it)[2]);
+        int h = std::stoi((*it)[3]);
+        if (w != width || h != height) continue;
+        double hz = std::stod((*it)[4]);
+        double delta = hz > fps ? hz - fps : fps - hz;
+        if (!found || delta < best_delta) {
+            found = true;
+            best_delta = delta;
+            mode_id_out = std::stoi((*it)[1]);
+            refresh_out = hz;
+        }
+    }
+    return found;
+}
+
 bool find_virtual_output_id(int& id_out) {
     std::string raw = run_capture("kscreen-doctor -o 2>/dev/null");
     if (raw.empty()) {
@@ -126,17 +167,34 @@ bool apply_virtual_output_mode(int width, int height, int fps) {
     // Already at the requested refresh? Then don't touch it — re-setting the
     // mode makes KWin tear the screencast stream down and renegotiate, which
     // is how the stream ends up pinned to the pre-switch refresh rate.
+    // Only leave it alone if it is already on the *best* available refresh —
+    // "close enough to the integer" is what left us 0.22 Hz off the panel.
     double before = active_refresh(id);
-    if (before >= fps - 1.0 && before < fps + 1.0) {
-        LOG_INFO("Virtual output %d already at %dx%d@%.2f, leaving it alone",
+    int best_id = -1;
+    double best_hz = 0.0;
+    bool have_best = find_closest_mode(id, width, height, fps, best_id, best_hz);
+    if (have_best && before > 0.0 &&
+        (before > best_hz ? before - best_hz : best_hz - before) < 0.005) {
+        LOG_INFO("Virtual output %d already at %dx%d@%.2f (best available), leaving it alone",
                  id, width, height, before);
         return true;
     }
 
+    // Pick the closest available refresh explicitly rather than letting
+    // kscreen match on the rounded rate.
     char set_cmd[256];
-    snprintf(set_cmd, sizeof(set_cmd),
-             "kscreen-doctor output.%d.mode.%dx%d@%d",
-             id, width, height, fps);
+    int mode_id = -1;
+    double mode_hz = 0.0;
+    if (find_closest_mode(id, width, height, fps, mode_id, mode_hz)) {
+        LOG_INFO("Selecting mode %d: %dx%d@%.2f (requested %d, delta %.2f Hz)",
+                 mode_id, width, height, mode_hz, fps,
+                 mode_hz > fps ? mode_hz - fps : fps - mode_hz);
+        snprintf(set_cmd, sizeof(set_cmd), "kscreen-doctor output.%d.mode.%d", id, mode_id);
+    } else {
+        snprintf(set_cmd, sizeof(set_cmd),
+                 "kscreen-doctor output.%d.mode.%dx%d@%d",
+                 id, width, height, fps);
+    }
     int rc = run_silent(set_cmd);
     if (rc != 0) {
         LOG_ERROR("Failed to set mode %dx%d@%d on virtual output %d (rc=%d)",
