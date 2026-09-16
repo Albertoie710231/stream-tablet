@@ -187,7 +187,16 @@ bool Server::init_encoder_from_client(const ClientInfo& client) {
         }
     }
 
-    int gop_size = fps / 2;
+    // Keyframe interval. fps/2 means two forced keyframes a second, and at
+    // 2960x1848 an AV1 intra frame is ~33x the size of an inter frame — that
+    // put 36% of all bandwidth into keyframes. The client already asks for a
+    // keyframe when it detects an incomplete frame (and the server honours it
+    // on both the control channel and the UDP feedback path), so forcing them
+    // this often buys very little. Default to one every 2 seconds.
+    int gop_seconds = 2;
+    if (const char* e = std::getenv("STREAM_TABLET_GOP_SECONDS")) gop_seconds = atoi(e);
+    if (gop_seconds < 1) gop_seconds = 1;
+    int gop_size = fps * gop_seconds;
     if (gop_size < 1) gop_size = 1;
 
     int cqp = client.cqp;
