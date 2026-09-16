@@ -4,6 +4,7 @@ set(SERVER_SOURCES
     src/server.cpp
     src/encoder/encoder_factory.cpp
     src/encoder/vaapi_encoder.cpp
+    src/encoder/vaapi_dmabuf_pipeline.cpp
     src/network/control_server.cpp
     src/network/mdns_publisher.cpp
     src/network/video_sender.cpp
@@ -29,6 +30,7 @@ endif()
 if(HAVE_PIPEWIRE)
     list(APPEND SERVER_SOURCES
         src/capture/pipewire_capture.cpp
+        src/capture/dmabuf_support.cpp
         src/capture/wayland-protocols/zkde-screencast-unstable-v1.c
     )
 endif()
@@ -62,6 +64,7 @@ target_include_directories(stream_tablet_server PRIVATE
     ${UV_INCLUDE_DIRS}
     ${AVCODEC_INCLUDE_DIRS}
     ${AVUTIL_INCLUDE_DIRS}
+    ${AVFILTER_INCLUDE_DIRS}
 )
 
 if(HAVE_X11)
@@ -73,6 +76,8 @@ if(HAVE_PIPEWIRE)
         ${PIPEWIRE_INCLUDE_DIRS}
         ${GIO_INCLUDE_DIRS}
         ${WAYLAND_CLIENT_INCLUDE_DIRS}
+        ${EGL_INCLUDE_DIRS}
+        ${GBM_INCLUDE_DIRS}
     )
 endif()
 
@@ -91,6 +96,7 @@ target_link_libraries(stream_tablet_server PRIVATE
     ${UV_LIBRARIES}
     ${AVCODEC_LIBRARIES}
     ${AVUTIL_LIBRARIES}
+    ${AVFILTER_LIBRARIES}
     OpenSSL::SSL
     OpenSSL::Crypto
 )
@@ -104,6 +110,8 @@ if(HAVE_PIPEWIRE)
         ${PIPEWIRE_LIBRARIES}
         ${GIO_LIBRARIES}
         ${WAYLAND_CLIENT_LIBRARIES}
+        ${EGL_LIBRARIES}
+        ${GBM_LIBRARIES}
     )
 endif()
 
@@ -126,6 +134,8 @@ if(HAVE_PIPEWIRE)
     # which requires -fpermissive in C++ and disabling -Wpedantic
     set_source_files_properties(src/capture/pipewire_capture.cpp
         PROPERTIES COMPILE_FLAGS "-Wno-pedantic -fpermissive")
+    set_source_files_properties(src/capture/dmabuf_support.cpp
+        PROPERTIES COMPILE_FLAGS "-Wno-pedantic")
     set_source_files_properties(src/capture/wayland-protocols/zkde-screencast-unstable-v1.c
         PROPERTIES COMPILE_FLAGS "-Wno-pedantic")
     if(HAVE_OPUS)
@@ -159,3 +169,32 @@ target_compile_options(stream_tablet_server PRIVATE
 
 # Install
 install(TARGETS stream_tablet_server RUNTIME DESTINATION bin)
+
+# Standalone fps probe for the PipeWire capture path (no encoder, no network)
+if(HAVE_PIPEWIRE)
+    add_executable(test_pipewire_fps
+        src/capture/test_pipewire_fps.cpp
+        src/capture/pipewire_capture.cpp
+        src/capture/dmabuf_support.cpp
+        src/capture/wayland-protocols/zkde-screencast-unstable-v1.c
+        src/display/kwin_output.cpp
+        src/util/logger.cpp
+    )
+    target_include_directories(test_pipewire_fps PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${PIPEWIRE_INCLUDE_DIRS}
+        ${GIO_INCLUDE_DIRS}
+        ${WAYLAND_CLIENT_INCLUDE_DIRS}
+        ${EGL_INCLUDE_DIRS}
+        ${GBM_INCLUDE_DIRS}
+    )
+    target_link_libraries(test_pipewire_fps PRIVATE
+        ${PIPEWIRE_LIBRARIES}
+        ${GIO_LIBRARIES}
+        ${WAYLAND_CLIENT_LIBRARIES}
+        ${EGL_LIBRARIES}
+        ${GBM_LIBRARIES}
+    )
+    target_compile_definitions(test_pipewire_fps PRIVATE HAVE_PIPEWIRE=1)
+endif()

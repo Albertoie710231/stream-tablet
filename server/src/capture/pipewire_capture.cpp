@@ -1,4 +1,5 @@
 #include "pipewire_capture.hpp"
+#include "dmabuf_support.hpp"
 #include "../util/logger.hpp"
 
 #include <pipewire/pipewire.h>
@@ -7,6 +8,11 @@
 #include <spa/param/video/type-info.h>
 #include <spa/utils/result.h>
 #include <spa/pod/pod.h>
+#include <spa/pod/builder.h>
+#include <spa/param/param.h>
+#include <spa/buffer/buffer.h>
+
+#include <libdrm/drm_fourcc.h>
 
 #include <gio/gio.h>
 #include <gio/gunixfdlist.h>
@@ -14,6 +20,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <cstring>
+#include <cstdlib>
 #include <chrono>
 #include <thread>
 
@@ -61,6 +68,15 @@ PipeWireCapture::~PipeWireCapture() {
 
 bool PipeWireCapture::init(const char* /*display_name*/) {
     LOG_INFO("Initializing PipeWire capture via xdg-desktop-portal...");
+
+    // Zero-copy capture is the default. STREAM_TABLET_DMABUF=0 forces the legacy
+    // CPU path for A/B testing, or as an escape hatch if a driver mishandles an
+    // exported modifier. If the encoder cannot import what we negotiate, the
+    // server renegotiates onto the CPU path automatically.
+    if (const char* env = std::getenv("STREAM_TABLET_DMABUF")) {
+        m_dmabuf_requested = (env[0] != '0');
+    }
+    LOG_INFO("DMA-BUF capture: %s", m_dmabuf_requested ? "requested" : "disabled by env");
 
     pw_init(nullptr, nullptr);
     init_stream_events();
@@ -124,6 +140,7 @@ bool PipeWireCapture::init(const char* /*display_name*/) {
 void PipeWireCapture::shutdown() {
     m_initialized = false;
     m_stream_ready = false;
+    release_held_buffer();
     cleanup_pipewire();
     cleanup_portal();
     pw_deinit();
@@ -139,6 +156,19 @@ bool PipeWireCapture::capture_frame(CapturedFrame& frame) {
 
     if (!m_has_new_frame.load(std::memory_order_acquire)) {
         pw_loop_iterate(pw_main_loop_get_loop(m_pw_loop), 2);
+    }
+
+    if (m_dmabuf_negotiated) {
+        // GPU path: on_stream_process holds the producer buffer, so the same
+        // descriptor stays valid and re-encodable until the next frame lands.
+        m_has_new_frame.store(false, std::memory_order_release);
+        if (!m_held_buffer) {
+            return false;  // No frame ever received
+        }
+        frame = m_dmabuf_frame;
+        frame.timestamp_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+        return true;
     }
 
     if (m_has_new_frame.load(std::memory_order_acquire)) {
@@ -463,6 +493,53 @@ bool PipeWireCapture::init_pipewire() {
     return true;
 }
 
+// Builds one SPA_PARAM_EnumFormat object. When `modifiers` is non-null the
+// object carries a DONT_FIXATE modifier choice, which is what makes KWin
+// offer DMA-BUF buffers instead of CPU-mapped ones.
+static const struct spa_pod* build_format_param(struct spa_pod_builder* b,
+                                                uint32_t spa_format,
+                                                const std::vector<uint64_t>* modifiers,
+                                                int target_fps) {
+    struct spa_pod_frame obj_frame;
+    struct spa_rectangle size_default = SPA_RECTANGLE(1920, 1080);
+    struct spa_rectangle size_min = SPA_RECTANGLE(1, 1);
+    struct spa_rectangle size_max = SPA_RECTANGLE(8192, 8192);
+    struct spa_fraction fr_default = SPA_FRACTION(static_cast<uint32_t>(target_fps), 1);
+    struct spa_fraction fr_min = SPA_FRACTION(0, 1);
+    struct spa_fraction fr_max = SPA_FRACTION(240, 1);
+
+    spa_pod_builder_push_object(b, &obj_frame, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat);
+    spa_pod_builder_add(b,
+        SPA_FORMAT_mediaType,    SPA_POD_Id(SPA_MEDIA_TYPE_video),
+        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+        SPA_FORMAT_VIDEO_format, SPA_POD_Id(spa_format),
+        0);
+
+    if (modifiers && !modifiers->empty()) {
+        struct spa_pod_frame choice_frame;
+        // MANDATORY tells the server this property must be honoured;
+        // DONT_FIXATE asks it to reply with the intersection so we can pick.
+        spa_pod_builder_prop(b, SPA_FORMAT_VIDEO_modifier,
+                             SPA_POD_PROP_FLAG_MANDATORY | SPA_POD_PROP_FLAG_DONT_FIXATE);
+        spa_pod_builder_push_choice(b, &choice_frame, SPA_CHOICE_Enum, 0);
+        // A choice's first value is the default, then every alternative.
+        spa_pod_builder_long(b, static_cast<int64_t>((*modifiers)[0]));
+        for (uint64_t m : *modifiers) {
+            spa_pod_builder_long(b, static_cast<int64_t>(m));
+        }
+        spa_pod_builder_pop(b, &choice_frame);
+    }
+
+    spa_pod_builder_add(b,
+        SPA_FORMAT_VIDEO_size,      SPA_POD_CHOICE_RANGE_Rectangle(
+            &size_default, &size_min, &size_max),
+        SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(
+            &fr_default, &fr_min, &fr_max),
+        0);
+
+    return static_cast<const struct spa_pod*>(spa_pod_builder_pop(b, &obj_frame));
+}
+
 bool PipeWireCapture::connect_stream(uint32_t node_id) {
     struct pw_properties* props = pw_properties_new(
         PW_KEY_MEDIA_TYPE, "Video",
@@ -480,43 +557,44 @@ bool PipeWireCapture::connect_stream(uint32_t node_id) {
     static struct spa_hook stream_listener;
     pw_stream_add_listener(m_pw_stream, &stream_listener, &stream_events, this);
 
-    uint8_t buffer[1024];
+    uint8_t buffer[4096];
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
 
-    struct spa_rectangle size_default = SPA_RECTANGLE(1920, 1080);
-    struct spa_rectangle size_min = SPA_RECTANGLE(1, 1);
-    struct spa_rectangle size_max = SPA_RECTANGLE(8192, 8192);
-    uint32_t target_fps = static_cast<uint32_t>(m_target_fps);
-    struct spa_fraction framerate_default = SPA_FRACTION(target_fps, 1);
-    struct spa_fraction framerate_min = SPA_FRACTION(0, 1);
-    struct spa_fraction framerate_max = SPA_FRACTION(240, 1);
+    // Order matters: the server picks the first param it can satisfy, so the
+    // modifier-bearing (DMA-BUF capable) variants go first and the plain
+    // CPU-buffer variants act as fallback.
+    const uint32_t formats[] = {
+        SPA_VIDEO_FORMAT_BGRx,
+        SPA_VIDEO_FORMAT_BGRA,
+        SPA_VIDEO_FORMAT_RGBx,
+        SPA_VIDEO_FORMAT_RGBA,
+    };
 
-    const struct spa_pod* params[1];
-    params[0] = static_cast<const struct spa_pod*>(spa_pod_builder_add_object(&b,
-        SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
-        SPA_FORMAT_mediaType,       SPA_POD_Id(SPA_MEDIA_TYPE_video),
-        SPA_FORMAT_mediaSubtype,    SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
-        SPA_FORMAT_VIDEO_format,    SPA_POD_CHOICE_ENUM_Id(5,
-            SPA_VIDEO_FORMAT_BGRx,
-            SPA_VIDEO_FORMAT_BGRA,
-            SPA_VIDEO_FORMAT_RGBx,
-            SPA_VIDEO_FORMAT_RGBA,
-            SPA_VIDEO_FORMAT_xBGR),
-        SPA_FORMAT_VIDEO_size,      SPA_POD_CHOICE_RANGE_Rectangle(
-            &size_default,
-            &size_min,
-            &size_max),
-        SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(
-            &framerate_default,
-            &framerate_min,
-            &framerate_max)));
+    const struct spa_pod* params[16];
+    uint32_t n_params = 0;
+
+    if (m_dmabuf_requested) {
+        for (uint32_t fmt : formats) {
+            uint32_t fourcc = spa_format_to_drm_fourcc(fmt);
+            if (!fourcc) continue;
+            auto mods = query_supported_modifiers(fourcc);
+            if (mods.empty()) continue;
+            m_offered_modifiers = mods;
+            params[n_params++] = build_format_param(&b, fmt, &mods, m_target_fps);
+        }
+    }
+
+    for (uint32_t fmt : formats) {
+        params[n_params++] = build_format_param(&b, fmt, nullptr, m_target_fps);
+    }
+    params[n_params++] = build_format_param(&b, SPA_VIDEO_FORMAT_xBGR, nullptr, m_target_fps);
 
     int ret = pw_stream_connect(
         m_pw_stream, PW_DIRECTION_INPUT, node_id,
         static_cast<enum pw_stream_flags>(
             PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS
         ),
-        params, 1
+        params, n_params
     );
 
     if (ret < 0) {
@@ -524,8 +602,25 @@ bool PipeWireCapture::connect_stream(uint32_t node_id) {
         return false;
     }
 
-    LOG_INFO("Connected to PipeWire stream, node %u, target %d fps", node_id, m_target_fps);
+    LOG_INFO("Connected to PipeWire stream, node %u, target %d fps, %u format param(s), dmabuf=%s",
+             node_id, m_target_fps, n_params, m_dmabuf_requested ? "requested" : "off");
     return true;
+}
+
+bool PipeWireCapture::disable_dmabuf() {
+    if (!m_dmabuf_requested && !m_dmabuf_negotiated) return true;
+    LOG_WARN("dmabuf: encoder cannot import these buffers — "
+             "renegotiating capture on the CPU path");
+    m_dmabuf_requested = false;
+    set_framerate(m_target_fps);  // reconnects the stream with CPU-only params
+    return !m_dmabuf_negotiated;
+}
+
+void PipeWireCapture::release_held_buffer() {
+    if (m_held_buffer && m_pw_stream) {
+        pw_stream_queue_buffer(m_pw_stream, m_held_buffer);
+    }
+    m_held_buffer = nullptr;
 }
 
 void PipeWireCapture::cleanup_pipewire() {
@@ -575,13 +670,108 @@ void PipeWireCapture::on_stream_param_changed(uint32_t id, const void* param_ptr
         return;
     }
 
+    // --- DMA-BUF modifier negotiation ---
+    // If we offered a DONT_FIXATE modifier choice, the server answers with the
+    // intersection of what we asked for and what its renderer can export. We
+    // then pick one and re-offer it fixated; only after that does the server
+    // send a final format we can allocate buffers for.
+    const struct spa_pod_prop* mod_prop =
+        spa_pod_find_prop(param, nullptr, SPA_FORMAT_VIDEO_modifier);
+
+    if (mod_prop && (mod_prop->flags & SPA_POD_PROP_FLAG_DONT_FIXATE)) {
+        const struct spa_pod* mod_pod = &mod_prop->value;
+        uint32_t n_vals = SPA_POD_CHOICE_N_VALUES(mod_pod);
+        const uint64_t* vals = static_cast<const uint64_t*>(SPA_POD_CHOICE_VALUES(mod_pod));
+
+        if (n_vals == 0) {
+            LOG_WARN("dmabuf: server returned an empty modifier set");
+            return;
+        }
+
+        for (uint32_t i = 0; i < n_vals; i++) {
+            LOG_DEBUG("dmabuf:   offered[%u] = 0x%llx (%s)", i,
+                      static_cast<unsigned long long>(vals[i]),
+                      drm_modifier_name(vals[i]));
+        }
+
+        // vals[0] is the server's own preferred modifier. Honour it unless it's
+        // the implicit one (INVALID), where the driver guesses the layout and
+        // VAAPI import can get it wrong — then take the first explicit option.
+        // STREAM_TABLET_DMABUF_MOD=linear forces LINEAR for A/B testing against
+        // a tiled layout, since a mismatch makes KWin insert a detiling blit.
+        uint64_t chosen = vals[0];
+        if (chosen == DRM_FORMAT_MOD_INVALID) {
+            for (uint32_t i = 1; i < n_vals; i++) {
+                if (vals[i] != DRM_FORMAT_MOD_INVALID) { chosen = vals[i]; break; }
+            }
+        }
+        if (const char* force = std::getenv("STREAM_TABLET_DMABUF_MOD")) {
+            if (strcmp(force, "linear") == 0) {
+                for (uint32_t i = 0; i < n_vals; i++) {
+                    if (vals[i] == DRM_FORMAT_MOD_LINEAR) { chosen = DRM_FORMAT_MOD_LINEAR; break; }
+                }
+            }
+        }
+
+        LOG_INFO("dmabuf: server offered %u modifier(s), choosing 0x%llx (%s)",
+                 n_vals, static_cast<unsigned long long>(chosen),
+                 drm_modifier_name(chosen));
+
+        uint8_t bb[1024];
+        struct spa_pod_builder b = SPA_POD_BUILDER_INIT(bb, sizeof(bb));
+        std::vector<uint64_t> single{chosen};
+        const struct spa_pod* fixated =
+            build_format_param(&b, info.format, &single, m_target_fps);
+        // Re-offer with a single value; the builder still marks it DONT_FIXATE
+        // but a one-element choice leaves the server nothing to choose.
+        pw_stream_update_params(m_pw_stream, &fixated, 1);
+        return;  // wait for the fixated format to come back
+    }
+
+    m_dmabuf_negotiated = (mod_prop != nullptr);
+    if (m_dmabuf_negotiated) {
+        m_negotiated_modifier = info.modifier;
+        m_drm_format = spa_format_to_drm_fourcc(info.format);
+    }
+
     m_width = info.size.width;
     m_height = info.size.height;
     m_format = info.format;
+    m_negotiated_fps_num = info.framerate.num;
+    m_negotiated_fps_den = info.framerate.denom ? info.framerate.denom : 1;
+    m_negotiated_max_fps_num = info.max_framerate.num;
+    m_negotiated_max_fps_den = info.max_framerate.denom ? info.max_framerate.denom : 1;
 
-    LOG_INFO("Stream format: %dx%d, format=%d (%s)",
+    double neg_fps = static_cast<double>(m_negotiated_fps_num) / m_negotiated_fps_den;
+    double neg_max_fps = static_cast<double>(m_negotiated_max_fps_num) / m_negotiated_max_fps_den;
+    LOG_INFO("Stream format: %dx%d, format=%d (%s), framerate=%.2f, max_framerate=%.2f (KWin caps at source refresh)",
              m_width, m_height, m_format,
-             spa_debug_type_find_name(spa_type_video_format, m_format));
+             spa_debug_type_find_name(spa_type_video_format, m_format),
+             neg_fps, neg_max_fps);
+
+    if (m_dmabuf_negotiated) {
+        LOG_INFO("Capture path: DMA-BUF (zero-copy), fourcc=0x%08x modifier=0x%llx (%s)",
+                 m_drm_format,
+                 static_cast<unsigned long long>(m_negotiated_modifier),
+                 drm_modifier_name(m_negotiated_modifier));
+    } else {
+        LOG_INFO("Capture path: CPU (memcpy + software colour conversion)");
+    }
+
+    // Only the DMA-BUF path needs a Buffers reply: without it the server
+    // defaults to MemPtr and we never see a dmabuf even with a modifier.
+    // The CPU path deliberately sends nothing so PipeWire keeps choosing its
+    // own pool size, exactly as it did before the zero-copy work.
+    if (m_dmabuf_negotiated) {
+        uint8_t bb[1024];
+        struct spa_pod_builder b = SPA_POD_BUILDER_INIT(bb, sizeof(bb));
+        const struct spa_pod* buf_params[1];
+        buf_params[0] = static_cast<const struct spa_pod*>(spa_pod_builder_add_object(&b,
+            SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
+            SPA_PARAM_BUFFERS_buffers,  SPA_POD_CHOICE_RANGE_Int(4, 2, 8),
+            SPA_PARAM_BUFFERS_dataType, SPA_POD_Int(1 << SPA_DATA_DmaBuf)));
+        pw_stream_update_params(m_pw_stream, buf_params, 1);
+    }
 
     m_frame_buffer.resize(static_cast<size_t>(m_width) * m_height * 4);
 }
@@ -593,7 +783,10 @@ void PipeWireCapture::on_stream_process() {
     struct spa_buffer* buf = b->buffer;
     struct spa_data* d = &buf->datas[0];
 
-    if (!d->data) {
+    const bool is_dmabuf = (d->type == SPA_DATA_DmaBuf);
+
+    // CPU path needs a mapped pointer; the GPU path deliberately has none.
+    if (!is_dmabuf && !d->data) {
         pw_stream_queue_buffer(m_pw_stream, b);
         return;
     }
@@ -601,6 +794,59 @@ void PipeWireCapture::on_stream_process() {
     auto now = std::chrono::high_resolution_clock::now();
     uint64_t timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
         now.time_since_epoch()).count();
+
+    if (m_fps_window_start_us == 0) {
+        m_fps_window_start_us = timestamp;
+    }
+    m_fps_window_frames++;
+    uint64_t window_us = timestamp - m_fps_window_start_us;
+    if (window_us >= 1'000'000) {
+        double measured_fps = m_fps_window_frames * 1'000'000.0 / window_us;
+        LOG_INFO("PipeWire delivered fps: %.1f (negotiated max %.1f)",
+                 measured_fps,
+                 static_cast<double>(m_negotiated_max_fps_num) / m_negotiated_max_fps_den);
+        m_fps_window_start_us = timestamp;
+        m_fps_window_frames = 0;
+    }
+
+    if (is_dmabuf) {
+        // Zero-copy: describe the producer's buffer and hold it so its fds stay
+        // valid while the encoder imports them. The previous frame's buffer goes
+        // back to KWin now — one frame in flight at a time.
+        release_held_buffer();
+
+        m_dmabuf_frame = CapturedFrame{};
+        m_dmabuf_frame.is_dmabuf = true;
+        m_dmabuf_frame.width = m_width;
+        m_dmabuf_frame.height = m_height;
+        m_dmabuf_frame.timestamp_us = timestamp;
+        m_dmabuf_frame.modifier = m_negotiated_modifier;
+        m_dmabuf_frame.drm_format = m_drm_format;
+
+        uint32_t n = buf->n_datas;
+        if (n > 4) n = 4;
+        for (uint32_t i = 0; i < n; i++) {
+            m_dmabuf_frame.planes[i].fd = static_cast<int>(buf->datas[i].fd);
+            m_dmabuf_frame.planes[i].offset =
+                buf->datas[i].chunk ? buf->datas[i].chunk->offset : 0;
+            m_dmabuf_frame.planes[i].stride =
+                buf->datas[i].chunk ? buf->datas[i].chunk->stride : 0;
+        }
+        m_dmabuf_frame.n_planes = static_cast<int>(n);
+        m_dmabuf_frame.stride = m_dmabuf_frame.planes[0].stride;
+
+        static bool logged_once = false;
+        if (!logged_once) {
+            logged_once = true;
+            LOG_INFO("dmabuf: first frame — %d plane(s), fd=%d stride=%u offset=%u",
+                     m_dmabuf_frame.n_planes, m_dmabuf_frame.planes[0].fd,
+                     m_dmabuf_frame.planes[0].stride, m_dmabuf_frame.planes[0].offset);
+        }
+
+        m_held_buffer = b;
+        m_has_new_frame.store(true, std::memory_order_release);
+        return;  // deliberately not queued back — released on next frame
+    }
 
     const uint8_t* src = static_cast<const uint8_t*>(d->data);
     int stride = d->chunk->stride ? d->chunk->stride : m_width * 4;
@@ -740,6 +986,8 @@ void PipeWireCapture::set_framerate(int fps) {
     m_target_fps = fps;
 
     if (m_pw_stream) {
+        release_held_buffer();
+        m_dmabuf_negotiated = false;
         pw_stream_disconnect(m_pw_stream);
         pw_stream_destroy(m_pw_stream);
         m_pw_stream = nullptr;

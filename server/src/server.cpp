@@ -219,6 +219,11 @@ bool Server::init_encoder_from_client(const ClientInfo& client) {
     enc_config.quality_mode = quality;
     enc_config.codec_type = codec;
     enc_config.cqp = cqp;
+    // Hand the negotiated DMA-BUF description to the encoder so it can build a
+    // zero-copy import pipeline instead of converting BGRA on the CPU.
+    enc_config.dmabuf_input = m_capture->is_dmabuf_capture();
+    enc_config.drm_format = m_capture->get_drm_format();
+    enc_config.drm_modifier = m_capture->get_drm_modifier();
 
     m_encoder = create_encoder(enc_config);
     if (!m_encoder) {
@@ -226,9 +231,23 @@ bool Server::init_encoder_from_client(const ClientInfo& client) {
         return false;
     }
 
+    m_encoder_config = enc_config;
+
+    // If capture negotiated DMA-BUF but the encoder could not build an import
+    // pipeline, every frame would be rejected. Drop capture back to CPU buffers
+    // and rebuild the encoder against them.
+    if (enc_config.dmabuf_input && !m_encoder->uses_dmabuf_input()) {
+        if (!fall_back_to_cpu_capture()) return false;
+    }
+
     // Set keyframe callback now that encoder exists
     m_control->set_keyframe_callback([this]() {
-        LOG_INFO("Keyframe requested by client");
+        LOG_INFO("Keyframe requested by client (TCP control)");
+        m_encoder->request_keyframe();
+    });
+    // Same handler for UDP-path keyframe requests on the video socket.
+    m_video_sender->set_keyframe_request_callback([this]() {
+        LOG_INFO("Keyframe requested by client (UDP feedback)");
         m_encoder->request_keyframe();
     });
 
@@ -251,6 +270,31 @@ bool Server::init_encoder_from_client(const ClientInfo& client) {
     }
 #endif
 
+    return true;
+}
+
+bool Server::fall_back_to_cpu_capture() {
+    m_encoder.reset();
+    m_capture->disable_dmabuf();
+
+    m_encoder_config.dmabuf_input = m_capture->is_dmabuf_capture();
+    m_encoder_config.drm_format = m_capture->get_drm_format();
+    m_encoder_config.drm_modifier = m_capture->get_drm_modifier();
+    m_encoder_config.width = m_capture->get_width();
+    m_encoder_config.height = m_capture->get_height();
+
+    m_encoder = create_encoder(m_encoder_config);
+    if (!m_encoder) {
+        LOG_ERROR("Failed to initialize hardware encoder on CPU fallback path");
+        return false;
+    }
+    m_encoder->request_keyframe();
+
+    // Re-arm the keyframe callbacks — they captured the old encoder's slot.
+    m_control->set_keyframe_callback([this]() { m_encoder->request_keyframe(); });
+    m_video_sender->set_keyframe_request_callback([this]() { m_encoder->request_keyframe(); });
+
+    LOG_WARN("Recovered onto the CPU capture path");
     return true;
 }
 
@@ -428,12 +472,17 @@ void Server::run() {
 
 bool Server::capture_and_encode_loop() {
     static auto last_timing_log = std::chrono::high_resolution_clock::now();
+    static auto last_frame_t = std::chrono::high_resolution_clock::time_point{};
     static int capture_fail_count = 0;
     static int encode_fail_count = 0;
     static long total_capture_us = 0;
     static long total_encode_us = 0;
     static long total_send_us = 0;
     static int timing_count = 0;
+    static long max_gap_us = 0;
+    static long sum_gap_us = 0;
+    static long sum_gap_sq_us = 0;  // for stddev
+    static long over20ms_gaps = 0;  // count of >20ms inter-frame gaps (perceptible stutters)
 
     auto t0 = std::chrono::high_resolution_clock::now();
 
@@ -446,13 +495,25 @@ bool Server::capture_and_encode_loop() {
 
     auto t1 = std::chrono::high_resolution_clock::now();
 
-    // Encode frame
+    // Encode frame (zero-copy when the capture backend gave us a DMA-BUF)
     EncodedFrame encoded;
-    if (!m_encoder->encode(frame.data, frame.width, frame.height, frame.stride,
-                           frame.timestamp_us, encoded)) {
+    if (!m_encoder->encode_frame(frame, encoded)) {
         encode_fail_count++;
+        // A zero-copy frame that will not import is unrecoverable per-frame: the
+        // pixels only exist on the GPU, so there is no CPU path to retry with.
+        // After a short grace period (the encoder legitimately returns EAGAIN
+        // while its async pipeline fills) renegotiate capture to CPU buffers
+        // rather than streaming nothing.
+        if (frame.is_dmabuf && m_encoder->uses_dmabuf_input()) {
+            if (++m_dmabuf_encode_failures == 30) {
+                LOG_ERROR("dmabuf: %u consecutive encode failures — abandoning "
+                          "the zero-copy path", m_dmabuf_encode_failures);
+                fall_back_to_cpu_capture();
+            }
+        }
         return false;
     }
+    m_dmabuf_encode_failures = 0;
 
     auto t2 = std::chrono::high_resolution_clock::now();
 
@@ -468,18 +529,55 @@ bool Server::capture_and_encode_loop() {
     total_send_us += std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count();
     timing_count++;
 
+    // Inter-frame gap (wall-clock between successive sends). Smooth 100 fps
+    // means avg=10ms with low max; bursty 100 fps shows up as max>>avg.
+    if (last_frame_t.time_since_epoch().count() != 0) {
+        long gap_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            t3 - last_frame_t).count();
+        sum_gap_us += gap_us;
+        sum_gap_sq_us += gap_us * gap_us / 1000;  // scale to avoid overflow
+        if (gap_us > max_gap_us) max_gap_us = gap_us;
+        if (gap_us > 20000) over20ms_gaps++;
+    }
+    last_frame_t = t3;
+
     // Log timing stats every 5 seconds
     auto now = std::chrono::high_resolution_clock::now();
     if (std::chrono::duration_cast<std::chrono::seconds>(now - last_timing_log).count() >= 5) {
+        // Wire throughput over the window — the number that says whether a
+        // missed frame rate is the encoder's fault or the network's.
+        static uint64_t last_bytes = 0;
+        uint64_t bytes_now = m_video_sender->get_bytes_sent();
+        uint64_t delta_bytes = bytes_now - last_bytes;
+        last_bytes = bytes_now;
+        double window_s = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - last_timing_log).count() / 1000.0;
+        if (timing_count > 0 && window_s > 0) {
+            LOG_INFO("Wire: %.1f Mbps | %.1f KB/frame | %.1f fps delivered",
+                     delta_bytes * 8.0 / window_s / 1e6,
+                     delta_bytes / 1024.0 / timing_count,
+                     timing_count / window_s);
+        }
         if (timing_count > 0) {
-            LOG_INFO("Timing (avg): capture=%.2fms encode=%.2fms send=%.2fms | fails: capture=%d encode=%d | frames=%d",
+            double avg_gap_ms = sum_gap_us / 1000.0 / std::max(1, timing_count - 1);
+            // stddev_ms = sqrt(E[g^2]-E[g]^2); E[g^2] reconstructed from scaled accumulator
+            double mean_g_us = (timing_count > 1) ? double(sum_gap_us) / (timing_count - 1) : 0.0;
+            double mean_gsq = (timing_count > 1) ? double(sum_gap_sq_us) * 1000.0 / (timing_count - 1) : 0.0;
+            double var = mean_gsq - mean_g_us * mean_g_us;
+            double std_ms = (var > 0) ? std::sqrt(var) / 1000.0 : 0.0;
+            LOG_INFO("Timing (avg): capture=%.2fms encode=%.2fms send=%.2fms | gap avg=%.2fms max=%.2fms std=%.2fms stutters>20ms=%ld | fails: capture=%d encode=%d | frames=%d",
                      total_capture_us / 1000.0 / timing_count,
                      total_encode_us / 1000.0 / timing_count,
                      total_send_us / 1000.0 / timing_count,
+                     avg_gap_ms,
+                     max_gap_us / 1000.0,
+                     std_ms,
+                     over20ms_gaps,
                      capture_fail_count, encode_fail_count, timing_count);
         }
         total_capture_us = total_encode_us = total_send_us = 0;
         capture_fail_count = encode_fail_count = timing_count = 0;
+        max_gap_us = sum_gap_us = sum_gap_sq_us = over20ms_gaps = 0;
         last_timing_log = now;
     }
 

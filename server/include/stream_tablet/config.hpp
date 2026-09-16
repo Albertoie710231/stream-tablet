@@ -74,6 +74,12 @@ struct EncoderConfig {
     QualityMode quality_mode = QualityMode::BALANCED;
     CodecType codec_type = CodecType::AUTO;  // Video codec to use
     int cqp = 20;  // Quality level for CQP mode (lower = better, 1-51)
+
+    // Zero-copy input. When set, the encoder builds a DRM-PRIME import +
+    // VAAPI VPP pipeline instead of converting BGRA on the CPU.
+    bool dmabuf_input = false;
+    uint32_t drm_format = 0;
+    uint64_t drm_modifier = 0;
 };
 
 // Protocol constants

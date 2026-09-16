@@ -50,6 +50,9 @@ private:
     bool create_capture_backend(const char* display);
     bool init_encoder_from_client(const ClientInfo& client);
     bool capture_and_encode_loop();  // returns true if a frame was captured+encoded
+    // Drops capture back to CPU buffers and rebuilds the encoder. Used both at
+    // init and when the zero-copy path fails at run time.
+    bool fall_back_to_cpu_capture();
     void handle_input(const InputEvent& event);
 
 #ifdef HAVE_OPUS
@@ -83,6 +86,10 @@ private:
 
     std::atomic<bool> m_running{false};
     uint32_t m_frame_count = 0;
+
+    // Kept so the encoder can be rebuilt without redoing the client handshake.
+    EncoderConfig m_encoder_config;
+    uint32_t m_dmabuf_encode_failures = 0;
 };
 
 }  // namespace stream_tablet

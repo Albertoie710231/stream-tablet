@@ -25,6 +25,7 @@ pkg_check_modules(DRM REQUIRED libdrm)
 pkg_check_modules(UV REQUIRED libuv)
 pkg_check_modules(AVCODEC REQUIRED libavcodec)
 pkg_check_modules(AVUTIL REQUIRED libavutil)
+pkg_check_modules(AVFILTER REQUIRED libavfilter)
 find_package(OpenSSL REQUIRED)
 
 # Optional: X11 capture
@@ -47,6 +48,9 @@ if(ENABLE_PIPEWIRE)
     pkg_check_modules(PIPEWIRE libpipewire-0.3)
     pkg_check_modules(GIO gio-2.0 gio-unix-2.0)
     pkg_check_modules(WAYLAND_CLIENT wayland-client)
+    # Zero-copy DMA-BUF capture needs EGL+GBM to enumerate DRM format modifiers
+    pkg_check_modules(EGL egl)
+    pkg_check_modules(GBM gbm)
     if(PIPEWIRE_FOUND AND GIO_FOUND AND WAYLAND_CLIENT_FOUND)
         message(STATUS "PipeWire capture: enabled (with KDE screencast protocol)")
         set(HAVE_PIPEWIRE TRUE)
