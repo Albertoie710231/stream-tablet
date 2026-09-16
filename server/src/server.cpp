@@ -4,6 +4,7 @@
 #include <thread>
 #include <cstdlib>
 #include <cstdio>
+#include <cmath>
 
 #ifdef HAVE_X11
 #include "capture/x11_capture.hpp"
@@ -151,6 +152,9 @@ bool Server::init(const ServerConfig& config) {
     });
     m_video_sender->set_keyframe_request_callback([this]() {
         LOG_DEBUG("Keyframe requested by client (UDP feedback)");
+        m_keyframe_requested.store(true, std::memory_order_relaxed);
+    });
+    m_video_sender->set_frame_dropped_callback([this]() {
         m_keyframe_requested.store(true, std::memory_order_relaxed);
     });
 
@@ -353,13 +357,17 @@ void Server::run() {
                                     m_config.video_port, m_config.input_port,
                                     audio_port, m_config.audio_sample_rate,
                                     m_config.audio_channels, m_config.audio_frame_ms,
-                                    codec_type);
+                                    codec_type, m_encoder->get_extradata());
 
         // Set video destination with pacing mode
         PacingMode pacing = static_cast<PacingMode>(m_config.pacing_mode);
         // Allow pacing at most a third of a frame interval, so a large keyframe
         // cannot stall the capture loop for multiple frames.
-        long max_pace = 1000000L / std::max(1, m_config.capture_fps) / 3;
+        // Pacing now runs on VideoSender's own thread, so spreading a burst no
+        // longer costs captured frames. 20ms measured zero incomplete frames on
+        // a USB link where 5.5ms lost roughly one frame every five seconds;
+        // beyond that the only effect is queueing delay.
+        long max_pace = 20000;
         if (const char* e = std::getenv("STREAM_TABLET_MAX_PACING_US")) max_pace = atol(e);
         m_video_sender->set_max_pacing_us(max_pace);
         m_video_sender->set_client(client_info.host, client_info.video_port, pacing);
@@ -498,6 +506,9 @@ bool Server::capture_and_encode_loop() {
     static long total_send_us = 0;
     static int timing_count = 0;
     static long max_gap_us = 0;
+    static size_t max_frame_bytes = 0;   // biggest encoded frame in the window
+    static size_t max_inter_bytes = 0;   // biggest non-keyframe
+    static long max_encode_us = 0;
     static long sum_gap_us = 0;
     static long sum_gap_sq_us = 0;  // for stddev
     static long over20ms_gaps = 0;  // count of >20ms inter-frame gaps (perceptible stutters)
@@ -554,6 +565,14 @@ bool Server::capture_and_encode_loop() {
     total_send_us += std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count();
     timing_count++;
 
+    {
+        long enc_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+        if (enc_us > max_encode_us) max_encode_us = enc_us;
+        if (encoded.data.size() > max_frame_bytes) max_frame_bytes = encoded.data.size();
+        if (!encoded.is_keyframe && encoded.data.size() > max_inter_bytes)
+            max_inter_bytes = encoded.data.size();
+    }
+
     // Inter-frame gap (wall-clock between successive sends). Smooth 100 fps
     // means avg=10ms with low max; bursty 100 fps shows up as max>>avg.
     if (last_frame_t.time_since_epoch().count() != 0) {
@@ -578,10 +597,11 @@ bool Server::capture_and_encode_loop() {
         double window_s = std::chrono::duration_cast<std::chrono::milliseconds>(
             now - last_timing_log).count() / 1000.0;
         if (timing_count > 0 && window_s > 0) {
-            LOG_INFO("Wire: %.1f Mbps | %.1f KB/frame | %.1f fps delivered",
+            LOG_INFO("Wire: %.1f Mbps | %.1f KB/frame | %.1f fps delivered | dropped=%lu",
                      delta_bytes * 8.0 / window_s / 1e6,
                      delta_bytes / 1024.0 / timing_count,
-                     timing_count / window_s);
+                     timing_count / window_s,
+                     static_cast<unsigned long>(m_video_sender->get_frames_dropped()));
         }
         if (timing_count > 0) {
             double avg_gap_ms = sum_gap_us / 1000.0 / std::max(1, timing_count - 1);
@@ -600,9 +620,15 @@ bool Server::capture_and_encode_loop() {
                      over20ms_gaps,
                      capture_fail_count, encode_fail_count, timing_count);
         }
+        LOG_INFO("Frame sizes: max=%.0f KB max_inter=%.0f KB | encode max=%.2fms",
+                 max_frame_bytes / 1024.0, max_inter_bytes / 1024.0,
+                 max_encode_us / 1000.0);
+
         total_capture_us = total_encode_us = total_send_us = 0;
         capture_fail_count = encode_fail_count = timing_count = 0;
         max_gap_us = sum_gap_us = sum_gap_sq_us = over20ms_gaps = 0;
+        max_frame_bytes = max_inter_bytes = 0;
+        max_encode_us = 0;
         last_timing_log = now;
     }
 
@@ -617,6 +643,46 @@ bool Server::capture_and_encode_loop() {
 void Server::handle_input(const InputEvent& event) {
     if (!m_uinput || !m_uinput->is_initialized()) {
         return;
+    }
+
+    // Catch a phantom stroke at the point it enters the server. Either the
+    // coordinate is impossible (a framing/parse fault), or it is valid but
+    // discontinuous while the pen is down (an event lost in transit, which the
+    // drawing app renders as a straight line to the new position).
+    {
+        static float last_x = -1.0f, last_y = -1.0f;
+        static bool pen_down = false;
+        const bool is_stylus =
+            event.type == InputEventType::STYLUS_DOWN ||
+            event.type == InputEventType::STYLUS_MOVE ||
+            event.type == InputEventType::STYLUS_UP ||
+            event.type == InputEventType::STYLUS_HOVER;
+
+        if (is_stylus) {
+            if (event.x < -0.01f || event.x > 1.01f ||
+                event.y < -0.01f || event.y > 1.01f ||
+                !std::isfinite(event.x) || !std::isfinite(event.y)) {
+                LOG_ERROR("PHANTOM: impossible coord type=%u x=%.4f y=%.4f p=%.3f "
+                          "tilt=%.3f/%.3f btn=%u ts=%u",
+                          static_cast<unsigned>(event.type), event.x, event.y,
+                          event.pressure, event.tilt_x, event.tilt_y,
+                          event.buttons, event.timestamp_ms);
+            } else if (pen_down && event.type == InputEventType::STYLUS_MOVE &&
+                       last_x >= 0.0f) {
+                float dx = event.x - last_x, dy = event.y - last_y;
+                float d = std::sqrt(dx * dx + dy * dy);
+                if (d > 0.15f) {
+                    LOG_WARN("PHANTOM: jump %.3f of screen while drawing "
+                             "(%.4f,%.4f) -> (%.4f,%.4f) p=%.3f ts=%u",
+                             d, last_x, last_y, event.x, event.y,
+                             event.pressure, event.timestamp_ms);
+                }
+            }
+            if (event.type == InputEventType::STYLUS_DOWN) pen_down = true;
+            if (event.type == InputEventType::STYLUS_UP)   pen_down = false;
+            last_x = event.x;
+            last_y = event.y;
+        }
     }
 
     // Transform coordinates

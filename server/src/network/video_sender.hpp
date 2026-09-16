@@ -5,6 +5,8 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <condition_variable>
+#include <deque>
 #include <thread>
 #include <vector>
 #include <netinet/in.h>
@@ -41,6 +43,7 @@ public:
     uint64_t get_packets_sent() const { return m_packets_sent; }
     uint64_t get_feedback_packets() const { return m_feedback_packets; }
     uint64_t get_keyframe_requests() const { return m_keyframe_requests_via_udp; }
+    uint64_t get_frames_dropped() const { return m_frames_dropped; }
 
     // Register a callback fired when a NACK / keyframe-request feedback
     // packet arrives on the UDP video socket. Server wires this to
@@ -52,12 +55,26 @@ public:
     // out of the frame budget. Set from the negotiated framerate.
     void set_max_pacing_us(long us) { m_max_pacing_us = us; }
 
+    // Fired when the send queue had to discard a frame. Dropping an inter
+    // frame breaks the decoder's reference chain, so the caller must force a
+    // keyframe or the picture stays corrupt until the next scheduled one.
+    void set_frame_dropped_callback(std::function<void()> cb) { m_frame_dropped_cb = std::move(cb); }
+
     void shutdown();
 
 private:
     bool send_packet(const uint8_t* data, size_t size);
     PacingMode detect_pacing_mode(const std::string& host);
     void feedback_loop();
+
+    // One encoded frame waiting to go out on the wire.
+    struct PendingFrame {
+        std::vector<uint8_t> data;
+        uint32_t frame_number = 0;
+        bool keyframe = false;
+    };
+    void sender_loop();
+    void transmit(const PendingFrame& f);
 
     int m_socket = -1;
     struct sockaddr_in m_client_addr = {};
@@ -73,6 +90,18 @@ private:
     int m_packets_per_burst = 0;      // Packets before pause
     int m_burst_delay_us = 0;         // Microseconds to pause
     long m_max_pacing_us = 4000;      // Cap on total pacing time per frame
+
+    // Transmission runs on its own thread. Pacing a large keyframe means
+    // sleeping between bursts, and doing that on the capture loop costs frames
+    // directly — a 485-packet keyframe spread over 70ms is four lost frames at
+    // 60fps. Off-thread, the spread is free and the link stops dropping packets.
+    std::thread m_sender_thread;
+    std::atomic<bool> m_sender_running{false};
+    std::mutex m_queue_mutex;
+    std::condition_variable m_queue_cv;
+    std::deque<PendingFrame> m_queue;
+    std::atomic<uint64_t> m_frames_dropped{0};
+    std::function<void()> m_frame_dropped_cb;
 
     // UDP feedback path (drains rx_queue + handles NACK/keyframe-request)
     std::thread m_feedback_thread;

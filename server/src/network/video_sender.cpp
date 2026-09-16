@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <cstring>
 #include <cstdio>
+#include <algorithm>
 #include <chrono>
 #include <thread>
 
@@ -48,6 +49,9 @@ bool VideoSender::init(uint16_t port) {
 
     m_feedback_running.store(true, std::memory_order_release);
     m_feedback_thread = std::thread(&VideoSender::feedback_loop, this);
+
+    m_sender_running.store(true, std::memory_order_release);
+    m_sender_thread = std::thread(&VideoSender::sender_loop, this);
 
     LOG_INFO("Video sender initialized on port %d", port);
     return true;
@@ -184,15 +188,73 @@ bool VideoSender::send_frame(const uint8_t* data, size_t size,
                              uint32_t frame_number, bool keyframe, uint64_t timestamp_us) {
     (void)timestamp_us;  // Reserved for future use
 
-    if (!m_client_set || m_socket < 0) {
+    if (!m_client_set || m_socket < 0 || !m_sender_running.load(std::memory_order_acquire)) {
         return false;
     }
+
+    PendingFrame f;
+    f.data.assign(data, data + size);
+    f.frame_number = frame_number;
+    f.keyframe = keyframe;
+
+    bool dropped = false;
+    {
+        std::lock_guard<std::mutex> lk(m_queue_mutex);
+        // Depth has to cover a paced keyframe: at 120fps a 20ms spread lets
+        // ~2.4 frames arrive behind it, and the sender then drains those in
+        // well under a millisecond because inter frames are tiny. Too shallow a
+        // queue turns that normal catch-up into dropped frames.
+        while (m_queue.size() >= 8) {
+            auto it = std::find_if(m_queue.begin(), m_queue.end(),
+                                   [](const PendingFrame& p) { return !p.keyframe; });
+            if (it == m_queue.end()) break;
+            m_queue.erase(it);
+            m_frames_dropped.fetch_add(1, std::memory_order_relaxed);
+            dropped = true;
+        }
+        m_queue.push_back(std::move(f));
+    }
+    m_queue_cv.notify_one();
+
+    // A dropped inter frame leaves the client decoding against a reference it
+    // never received. It cannot detect that itself — every fragment of every
+    // frame it did receive arrived — so it will not ask for a keyframe. We have
+    // to force one or the picture stays broken until the next scheduled one.
+    if (dropped && m_frame_dropped_cb) {
+        LOG_WARN("Send queue saturated - dropped a frame, forcing a keyframe");
+        m_frame_dropped_cb();
+    }
+    return true;
+}
+
+void VideoSender::sender_loop() {
+    while (m_sender_running.load(std::memory_order_acquire)) {
+        PendingFrame f;
+        {
+            std::unique_lock<std::mutex> lk(m_queue_mutex);
+            m_queue_cv.wait_for(lk, std::chrono::milliseconds(100), [this] {
+                return !m_queue.empty() || !m_sender_running.load(std::memory_order_acquire);
+            });
+            if (!m_sender_running.load(std::memory_order_acquire)) return;
+            if (m_queue.empty()) continue;
+            f = std::move(m_queue.front());
+            m_queue.pop_front();
+        }
+        transmit(f);
+    }
+}
+
+void VideoSender::transmit(const PendingFrame& frame) {
+    const uint8_t* data = frame.data.data();
+    size_t size = frame.data.size();
+    uint32_t frame_number = frame.frame_number;
+    bool keyframe = frame.keyframe;
 
     // Calculate number of fragments needed
     size_t num_fragments = (size + MAX_PAYLOAD_SIZE - 1) / MAX_PAYLOAD_SIZE;
     if (num_fragments > 65535) {
         LOG_ERROR("Frame too large: %zu bytes requires %zu fragments", size, num_fragments);
-        return false;
+        return;
     }
 
     // Log frame sizes for diagnostics
@@ -275,7 +337,7 @@ bool VideoSender::send_frame(const uint8_t* data, size_t size,
 
         // Send
         if (!send_packet(packet.data(), packet.size())) {
-            return false;
+            return;
         }
 
         offset += payload_size;
@@ -289,8 +351,6 @@ bool VideoSender::send_frame(const uint8_t* data, size_t size,
             }
         }
     }
-
-    return true;
 }
 
 bool VideoSender::send_packet(const uint8_t* data, size_t size) {
@@ -308,6 +368,11 @@ bool VideoSender::send_packet(const uint8_t* data, size_t size) {
 }
 
 void VideoSender::shutdown() {
+    m_sender_running.store(false, std::memory_order_release);
+    m_queue_cv.notify_all();
+    if (m_sender_thread.joinable()) {
+        m_sender_thread.join();
+    }
     m_feedback_running.store(false, std::memory_order_release);
     if (m_feedback_thread.joinable()) {
         m_feedback_thread.join();
