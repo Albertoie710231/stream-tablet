@@ -236,6 +236,7 @@ class StreamActivity : AppCompatActivity() {
         // Register surface callback BEFORE starting connection
         binding.videoSurface.holder.addCallback(object : android.view.SurfaceHolder.Callback {
             override fun surfaceCreated(holder: android.view.SurfaceHolder) {
+                android.util.Log.i("StreamActivity", "surfaceCreated (connected=$isConnected)")
                 surfaceReady = true
                 pendingSurface = holder
 
@@ -248,6 +249,7 @@ class StreamActivity : AppCompatActivity() {
             override fun surfaceChanged(holder: android.view.SurfaceHolder, format: Int, width: Int, height: Int) {}
 
             override fun surfaceDestroyed(holder: android.view.SurfaceHolder) {
+                android.util.Log.w("StreamActivity", "surfaceDestroyed - decoder will be torn down")
                 surfaceReady = false
                 pendingSurface = null
                 decoder?.stop()
@@ -461,6 +463,13 @@ class StreamActivity : AppCompatActivity() {
     }
 
     private fun resizeVideoForKeyboard(keyboardHeight: Int) {
+        // Insets are dispatched for ANY window change, not just the IME — the
+        // system bars toggling via hideSystemUI() is enough. Re-applying the
+        // same layout params still forces a re-layout, and a SurfaceView
+        // re-layout destroys and recreates its surface, tearing down the
+        // decoder. Ignore dispatches that do not actually change anything.
+        if (keyboardHeight == currentKeyboardHeight) return
+
         currentKeyboardHeight = keyboardHeight
         runOnUiThread {
             // Show/hide navigation buttons based on keyboard visibility
@@ -520,6 +529,15 @@ class StreamActivity : AppCompatActivity() {
             }
 
             val params = binding.videoSurface.layoutParams as FrameLayout.LayoutParams
+            val targetGravity = if (currentKeyboardHeight > 0)
+                Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL else Gravity.CENTER
+            val targetBottom = if (currentKeyboardHeight > 0) currentKeyboardHeight else 0
+            if (params.width == newWidth && params.height == newHeight &&
+                params.bottomMargin == targetBottom && params.gravity == targetGravity) {
+                // Identical layout: assigning layoutParams anyway would recreate
+                // the surface for nothing.
+                return@runOnUiThread
+            }
             params.width = newWidth
             params.height = newHeight
             // Position video just above keyboard when visible
