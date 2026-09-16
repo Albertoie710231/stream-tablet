@@ -22,6 +22,12 @@ Server::Server() = default;
 
 Server::~Server() {
     stop();
+    // Join VideoSender's feedback thread here rather than relying on member
+    // destruction order: it holds a callback bound to this Server, so it must
+    // stop before any member it might touch is gone.
+    if (m_video_sender) {
+        m_video_sender->shutdown();
+    }
 }
 
 bool Server::create_capture_backend(const char* display) {
@@ -133,6 +139,19 @@ bool Server::init(const ServerConfig& config) {
     // Set input callback
     m_input_receiver->set_callback([this](const InputEvent& event) {
         handle_input(event);
+    });
+
+    // Keyframe requests only raise a flag. The UDP feedback path runs on
+    // VideoSender's own thread, and m_encoder is created and destroyed around
+    // each client session on the main loop — dereferencing it from there was a
+    // use-after-free waiting for the client to start sending feedback packets.
+    m_control->set_keyframe_callback([this]() {
+        LOG_DEBUG("Keyframe requested by client (TCP control)");
+        m_keyframe_requested.store(true, std::memory_order_relaxed);
+    });
+    m_video_sender->set_keyframe_request_callback([this]() {
+        LOG_DEBUG("Keyframe requested by client (UDP feedback)");
+        m_keyframe_requested.store(true, std::memory_order_relaxed);
     });
 
     LOG_INFO("Server initialized: %dx%d, waiting for client to configure stream...",
@@ -249,17 +268,6 @@ bool Server::init_encoder_from_client(const ClientInfo& client) {
         if (!fall_back_to_cpu_capture()) return false;
     }
 
-    // Set keyframe callback now that encoder exists
-    m_control->set_keyframe_callback([this]() {
-        LOG_INFO("Keyframe requested by client (TCP control)");
-        m_encoder->request_keyframe();
-    });
-    // Same handler for UDP-path keyframe requests on the video socket.
-    m_video_sender->set_keyframe_request_callback([this]() {
-        LOG_INFO("Keyframe requested by client (UDP feedback)");
-        m_encoder->request_keyframe();
-    });
-
     const char* codec_names[] = {"AV1", "HEVC", "H.264"};
     uint8_t actual_codec = m_encoder->get_codec_type();
     const char* codec_name = (actual_codec < 3) ? codec_names[actual_codec] : "unknown";
@@ -298,11 +306,6 @@ bool Server::fall_back_to_cpu_capture() {
         return false;
     }
     m_encoder->request_keyframe();
-
-    // Re-arm the keyframe callbacks — they captured the old encoder's slot.
-    m_control->set_keyframe_callback([this]() { m_encoder->request_keyframe(); });
-    m_video_sender->set_keyframe_request_callback([this]() { m_encoder->request_keyframe(); });
-
     LOG_WARN("Recovered onto the CPU capture path");
     return true;
 }
@@ -396,6 +399,7 @@ void Server::run() {
 
         // Reset frame count for new session
         m_frame_count = 0;
+        m_keyframe_requested.store(false, std::memory_order_relaxed);
         m_encoder->request_keyframe();  // Start with a keyframe
 
         // Calculate frame interval
@@ -497,6 +501,13 @@ bool Server::capture_and_encode_loop() {
     static long over20ms_gaps = 0;  // count of >20ms inter-frame gaps (perceptible stutters)
 
     auto t0 = std::chrono::high_resolution_clock::now();
+
+    // Honour any keyframe request raised since the last frame. Done here so the
+    // encoder is only ever touched from this thread.
+    if (m_keyframe_requested.exchange(false, std::memory_order_relaxed)) {
+        LOG_INFO("Keyframe requested by client");
+        m_encoder->request_keyframe();
+    }
 
     // Capture frame
     CapturedFrame frame;

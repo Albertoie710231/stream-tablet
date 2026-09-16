@@ -463,11 +463,10 @@ bool VAAPIEncoder::encode_hw_frame(void* av_hw_frame, uint64_t timestamp_us,
     AVFrame* hw = static_cast<AVFrame*>(av_hw_frame);
 
     // Force keyframe if requested
-    if (m_force_keyframe) {
+    if (m_force_keyframe.exchange(false, std::memory_order_relaxed)) {
         hw->pict_type = AV_PICTURE_TYPE_I;
         hw->flags |= AV_FRAME_FLAG_KEY;
         LOG_INFO("Forcing keyframe for frame %ld", m_frame_count);
-        m_force_keyframe = false;
     } else {
         hw->pict_type = AV_PICTURE_TYPE_NONE;
         hw->flags &= ~AV_FRAME_FLAG_KEY;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "encoder_backend.hpp"
+#include <atomic>
 #include <memory>
 
 namespace stream_tablet {
@@ -15,7 +16,7 @@ public:
     void shutdown() override;
     bool encode(const uint8_t* bgra_data, int width, int height, int stride,
                 uint64_t timestamp_us, EncodedFrame& output) override;
-    void request_keyframe() override { m_force_keyframe = true; }
+    void request_keyframe() override { m_force_keyframe.store(true, std::memory_order_relaxed); }
     void set_bitrate(int bitrate) override;
     int get_width() const override { return m_config.width; }
     int get_height() const override { return m_config.height; }
@@ -29,7 +30,10 @@ private:
 
     EncoderConfig m_config;
     uint64_t m_frame_count = 0;
-    bool m_force_keyframe = false;
+    // Atomic because request_keyframe() is a public entry point with no
+    // documented thread affinity, even though the server now only calls it
+    // from the capture loop.
+    std::atomic<bool> m_force_keyframe{false};
     uint8_t m_actual_codec = 0;  // 0=AV1, 1=HEVC, 2=H264
 };
 
