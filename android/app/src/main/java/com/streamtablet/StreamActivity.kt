@@ -312,6 +312,17 @@ class StreamActivity : AppCompatActivity() {
             val codecType = VideoDecoder.CodecType.fromId(config.codecType)
             android.util.Log.i("StreamActivity", "Creating ${codecType.displayName} decoder")
 
+            // Tell the platform the true content rate. Without this Android
+            // infers it from buffer arrival timing, and on an LTPO panel the
+            // governor settles wherever it last saw content — it had pinned the
+            // render rate at 60 while we delivered a clean 120, so every second
+            // frame was discarded at the final step.
+            //
+            // FIXED_SOURCE says "this is the rate, pick a mode that divides it
+            // cleanly"; ALWAYS permits a non-seamless switch, which is what is
+            // needed to actually leave 60Hz.
+            applyContentFrameRate(holder.surface, connectionManager.preferredFps)
+
             val newDecoder = VideoDecoder(holder.surface, config.width, config.height,
                 codecType, config.extradata, connectionManager.preferredFps)
             newDecoder.forceSoftware = try {
@@ -360,6 +371,43 @@ class StreamActivity : AppCompatActivity() {
 
         } catch (e: Exception) {
             android.util.Log.e("StreamActivity", "Error starting decoder", e)
+        }
+    }
+
+    private fun applyContentFrameRate(surface: android.view.Surface, fps: Int) {
+        if (fps <= 0) return
+        try {
+            when {
+                android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S -> {
+                    surface.setFrameRate(
+                        fps.toFloat(),
+                        android.view.Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
+                        android.view.Surface.CHANGE_FRAME_RATE_ALWAYS
+                    )
+                }
+                android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R -> {
+                    surface.setFrameRate(
+                        fps.toFloat(),
+                        android.view.Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE
+                    )
+                }
+                else -> return
+            }
+            android.util.Log.i("StreamActivity", "Declared content frame rate: ${fps}fps")
+        } catch (e: Exception) {
+            android.util.Log.w("StreamActivity", "setFrameRate($fps) failed", e)
+        }
+
+        // Also ask the window for the matching mode — belt and braces on OEM
+        // builds where the Surface hint alone does not move the governor.
+        runOnUiThread {
+            try {
+                val lp = window.attributes
+                lp.preferredRefreshRate = fps.toFloat()
+                window.attributes = lp
+            } catch (e: Exception) {
+                android.util.Log.w("StreamActivity", "preferredRefreshRate failed", e)
+            }
         }
     }
 
