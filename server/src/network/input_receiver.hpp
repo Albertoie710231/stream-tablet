@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 #include <openssl/ssl.h>
 
 namespace stream_tablet {
@@ -65,6 +66,13 @@ private:
 
     int m_listen_socket = -1;
     int m_client_socket = -1;
+
+    // TCP is a byte stream: a single recv() can return a partial event, or
+    // several at once. Unparsed bytes live here between calls so the stream
+    // never desynchronises. Dropping a partial read (as this used to do)
+    // misaligns every subsequent event and turns stylus coordinates into
+    // garbage — strokes jump to random points on screen.
+    std::vector<uint8_t> m_rx_buffer;
 
     InputCallback m_callback;
 };

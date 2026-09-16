@@ -80,31 +80,45 @@ bool InputReceiver::accept_client() {
 }
 
 bool InputReceiver::read_event(InputEvent& event) {
+    constexpr size_t kPacketSize = sizeof(InputEventPacket);
+
+    // Top the buffer up with whatever is available, then parse whole packets
+    // out of it. Anything left over stays for the next call.
+    if (m_rx_buffer.size() < kPacketSize) {
+        uint8_t chunk[4096];
+        ssize_t n = recv(m_client_socket, chunk, sizeof(chunk), MSG_DONTWAIT);
+        if (n > 0) {
+            m_rx_buffer.insert(m_rx_buffer.end(), chunk, chunk + n);
+        } else if (n == 0) {
+            LOG_INFO("Input client disconnected");
+            close(m_client_socket);
+            m_client_socket = -1;
+            m_rx_buffer.clear();
+            return false;
+        }
+        // n < 0 with EAGAIN just means nothing more is available right now.
+    }
+
+    if (m_rx_buffer.size() < kPacketSize) {
+        return false;
+    }
+
     InputEventPacket packet;
-    ssize_t n = recv(m_client_socket, &packet, sizeof(packet), MSG_DONTWAIT);
+    memcpy(&packet, m_rx_buffer.data(), kPacketSize);
+    m_rx_buffer.erase(m_rx_buffer.begin(), m_rx_buffer.begin() + kPacketSize);
 
-    if (n == sizeof(packet)) {
-        event.type = static_cast<InputEventType>(packet.type);
-        event.pointer_id = packet.pointer_id;
-        event.x = packet.x;
-        event.y = packet.y;
-        event.pressure = packet.pressure;
-        event.tilt_x = packet.tilt_x;
-        event.tilt_y = packet.tilt_y;
-        event.buttons = packet.buttons;
-        event.timestamp_ms = packet.timestamp;
-        return true;
-    }
-
-    if (n == 0) {
-        // Client disconnected
-        LOG_INFO("Input client disconnected");
-        close(m_client_socket);
-        m_client_socket = -1;
-    }
-
-    return false;
+    event.type = static_cast<InputEventType>(packet.type);
+    event.pointer_id = packet.pointer_id;
+    event.x = packet.x;
+    event.y = packet.y;
+    event.pressure = packet.pressure;
+    event.tilt_x = packet.tilt_x;
+    event.tilt_y = packet.tilt_y;
+    event.buttons = packet.buttons;
+    event.timestamp_ms = packet.timestamp;
+    return true;
 }
+
 
 void InputReceiver::process() {
     // Try to accept new client if not connected
@@ -129,6 +143,7 @@ void InputReceiver::process() {
 }
 
 void InputReceiver::reset() {
+    m_rx_buffer.clear();
     if (m_client_socket >= 0) {
         close(m_client_socket);
         m_client_socket = -1;

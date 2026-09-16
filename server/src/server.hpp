@@ -63,6 +63,13 @@ private:
     ServerConfig m_config;
     CaptureBackendType m_backend_type = CaptureBackendType::AUTO;
 
+    // Set by whoever asks for a keyframe — the TCP control channel on the main
+    // loop, or VideoSender's UDP feedback thread. Consumed by the capture loop,
+    // which is the only place m_encoder is known to exist. Declared before
+    // m_video_sender so it outlives the thread that writes it (members are
+    // destroyed in reverse declaration order).
+    std::atomic<bool> m_keyframe_requested{false};
+
     std::unique_ptr<CaptureBackend> m_capture;
     std::unique_ptr<EncoderBackend> m_encoder;
     std::unique_ptr<ControlServer> m_control;

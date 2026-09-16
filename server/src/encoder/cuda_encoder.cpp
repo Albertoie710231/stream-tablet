@@ -377,11 +377,10 @@ bool CUDAEncoder::encode(const uint8_t* bgra_data, int width, int height, int st
     m_impl->hw_frame->pts = sw_frame->pts;
 
     // Force keyframe if requested
-    if (m_force_keyframe) {
+    if (m_force_keyframe.exchange(false, std::memory_order_relaxed)) {
         m_impl->hw_frame->pict_type = AV_PICTURE_TYPE_I;
         m_impl->hw_frame->flags |= AV_FRAME_FLAG_KEY;
         LOG_INFO("Forcing keyframe for frame %ld", m_frame_count);
-        m_force_keyframe = false;
     } else {
         m_impl->hw_frame->pict_type = AV_PICTURE_TYPE_NONE;
         m_impl->hw_frame->flags &= ~AV_FRAME_FLAG_KEY;
