@@ -14,6 +14,7 @@ extern "C" {
 #include <unistd.h>
 #include <dirent.h>
 #include <cstring>
+#include <cstdlib>
 #include <chrono>
 #include <algorithm>
 #include <vector>
@@ -121,12 +122,25 @@ static bool try_encoder_on_device(const char* device, const char* encoder_name,
     (*codec_ctx)->delay = 0;
     (*codec_ctx)->thread_count = 1;  // Single thread for lowest latency
 
-    // VAAPI-specific settings
-    // Use async_depth=4 for high FPS to allow pipelining (adds ~2-3 frames latency)
-    // Use async_depth=1 for lower FPS for minimum latency
-    int async_depth = (config.framerate > 90) ? 4 : 1;
+    // VAAPI-specific settings.
+    // async_depth is the single biggest lever on this pipeline. At 1 the encode
+    // is fully synchronous: avcodec_send_frame blocks ~7.5ms on a 2960x1848 AV1
+    // frame, and that sits on the capture loop's critical path. At 2 the GPU
+    // works in the background and send drops to ~0.15ms, at the cost of one
+    // frame of output latency. That headroom is what makes >90fps reachable at
+    // all — the old 8.7ms pipeline could not fit a 120fps budget of 8.33ms.
+    // Measured on an Arc B580: encode 7.86ms -> 0.43ms, 120fps sustained.
+    int async_depth = 2;
+    if (const char* e = std::getenv("STREAM_TABLET_ASYNC")) async_depth = atoi(e);
+    if (async_depth < 1) async_depth = 1;
     av_opt_set_int((*codec_ctx)->priv_data, "async_depth", async_depth, 0);
     av_opt_set_int((*codec_ctx)->priv_data, "idr_interval", config.gop_size, 0);
+
+    // Intel's fixed-function encode path (VDENC). Usually far faster than the
+    // render-based path; on some parts it is the only one that supports AV1.
+    if (const char* e = std::getenv("STREAM_TABLET_LOWPOWER")) {
+        av_opt_set_int((*codec_ctx)->priv_data, "low_power", atoi(e), 0);
+    }
 
     if (config.quality_mode == QualityMode::HIGH_QUALITY || config.quality_mode == QualityMode::AUTO) {
         // CQP mode - constant quality, variable bitrate
@@ -142,13 +156,12 @@ static bool try_encoder_on_device(const char* device, const char* encoder_name,
         (*codec_ctx)->rc_max_rate = config.bitrate * 2;
         (*codec_ctx)->rc_buffer_size = config.bitrate;
         // Quality preset - use fast for high FPS, medium otherwise
-        // Quality preset - use fast for high FPS, medium otherwise
-        if (config.framerate > 90) {
-            av_opt_set((*codec_ctx)->priv_data, "preset", "fast", 0);
-        } else if (config.quality_mode == QualityMode::AUTO) {
-            av_opt_set((*codec_ctx)->priv_data, "preset", "medium", 0);
-        } else {
-            av_opt_set((*codec_ctx)->priv_data, "preset", "quality", 0);
+        // NOTE: "preset" is not a VAAPI encoder option (it belongs to QSV/NVENC).
+        // av1_vaapi, hevc_vaapi and h264_vaapi all reject it, so the calls that
+        // used to be here were silent no-ops. Speed on VAAPI comes from
+        // async_depth and rc_mode instead. h264_vaapi alone accepts "quality".
+        if (const char* e = std::getenv("STREAM_TABLET_PRESET")) {
+            av_opt_set((*codec_ctx)->priv_data, "preset", e, 0);
         }
     } else {
         // CBR mode - constant bitrate
@@ -157,8 +170,7 @@ static bool try_encoder_on_device(const char* device, const char* encoder_name,
         // Smaller buffer = lower latency (1 frame worth of data)
         (*codec_ctx)->rc_buffer_size = config.bitrate / config.framerate;
         av_opt_set((*codec_ctx)->priv_data, "rc_mode", "CBR", 0);
-        av_opt_set((*codec_ctx)->priv_data, "preset", "fast", 0);
-        av_opt_set((*codec_ctx)->priv_data, "tune", "zerolatency", 0);
+        // "preset"/"tune" are not VAAPI options — see the note above.
     }
 
     // Frames context the encoder draws from. On the zero-copy path this is the
@@ -299,6 +311,13 @@ bool VAAPIEncoder::init(const EncoderConfig& config) {
                          config.width, config.height, config.framerate, config.bitrate,
                          codec.display_name,
                          m_dmabuf_active ? "DMA-BUF zero-copy" : "CPU upload");
+                {
+                    int64_t lp = -1, ad = -1;
+                    av_opt_get_int(m_impl->codec_ctx->priv_data, "low_power", 0, &lp);
+                    av_opt_get_int(m_impl->codec_ctx->priv_data, "async_depth", 0, &ad);
+                    LOG_INFO("Encoder tuning: low_power=%lld async_depth=%lld",
+                             (long long)lp, (long long)ad);
+                }
                 return true;
             }
         }
