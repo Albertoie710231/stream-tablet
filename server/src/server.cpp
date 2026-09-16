@@ -359,7 +359,9 @@ void Server::run() {
         PacingMode pacing = static_cast<PacingMode>(m_config.pacing_mode);
         // Allow pacing at most a third of a frame interval, so a large keyframe
         // cannot stall the capture loop for multiple frames.
-        m_video_sender->set_max_pacing_us(1000000L / std::max(1, m_config.capture_fps) / 3);
+        long max_pace = 1000000L / std::max(1, m_config.capture_fps) / 3;
+        if (const char* e = std::getenv("STREAM_TABLET_MAX_PACING_US")) max_pace = atol(e);
+        m_video_sender->set_max_pacing_us(max_pace);
         m_video_sender->set_client(client_info.host, client_info.video_port, pacing);
 
 #ifdef HAVE_OPUS
