@@ -47,6 +47,11 @@ public:
     // m_encoder->request_keyframe(). Safe to call before or after init().
     void set_keyframe_request_callback(std::function<void()> cb);
 
+    // Upper bound on how long send_frame() may spend pacing a single frame.
+    // send_frame runs on the capture loop, so pacing time is taken directly
+    // out of the frame budget. Set from the negotiated framerate.
+    void set_max_pacing_us(long us) { m_max_pacing_us = us; }
+
     void shutdown();
 
 private:
@@ -67,6 +72,7 @@ private:
     size_t m_pacing_threshold = 0;    // Frame size threshold for pacing
     int m_packets_per_burst = 0;      // Packets before pause
     int m_burst_delay_us = 0;         // Microseconds to pause
+    long m_max_pacing_us = 4000;      // Cap on total pacing time per frame
 
     // UDP feedback path (drains rx_queue + handles NACK/keyframe-request)
     std::thread m_feedback_thread;

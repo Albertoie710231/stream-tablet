@@ -230,6 +230,22 @@ bool VideoSender::send_frame(const uint8_t* data, size_t size,
         need_pacing = (size > m_pacing_threshold);
     }
 
+    // Clamp the total pacing cost. The aggressive tiers spread a large
+    // keyframe over hundreds of sleeps — a 645-packet frame at 2 packets per
+    // 300us costs 96ms, which at 120fps is twelve frames we never capture.
+    // Keep the burst structure (that is what protects the client's receive
+    // queue) but compress the delays to fit the budget.
+    if (need_pacing && packets_per_burst > 0 && burst_delay_us > 0) {
+        size_t bursts = num_fragments / static_cast<size_t>(packets_per_burst);
+        long total_us = static_cast<long>(bursts) * burst_delay_us;
+        if (bursts > 0 && total_us > m_max_pacing_us) {
+            int scaled = static_cast<int>(m_max_pacing_us / static_cast<long>(bursts));
+            LOG_DEBUG("Pacing clamped: %zu bursts x %dus = %ldus -> %dus/burst",
+                      bursts, burst_delay_us, total_us, scaled);
+            burst_delay_us = scaled;
+        }
+    }
+
     // Send each fragment (with pacing based on mode)
     size_t offset = 0;
     int packets_in_burst = 0;
