@@ -1,8 +1,12 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
-#include <vector>
+#include <functional>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <vector>
 #include <netinet/in.h>
 #include <openssl/ssl.h>
 
@@ -35,12 +39,20 @@ public:
     // Get statistics
     uint64_t get_bytes_sent() const { return m_bytes_sent; }
     uint64_t get_packets_sent() const { return m_packets_sent; }
+    uint64_t get_feedback_packets() const { return m_feedback_packets; }
+    uint64_t get_keyframe_requests() const { return m_keyframe_requests_via_udp; }
+
+    // Register a callback fired when a NACK / keyframe-request feedback
+    // packet arrives on the UDP video socket. Server wires this to
+    // m_encoder->request_keyframe(). Safe to call before or after init().
+    void set_keyframe_request_callback(std::function<void()> cb);
 
     void shutdown();
 
 private:
     bool send_packet(const uint8_t* data, size_t size);
     PacingMode detect_pacing_mode(const std::string& host);
+    void feedback_loop();
 
     int m_socket = -1;
     struct sockaddr_in m_client_addr = {};
@@ -55,6 +67,14 @@ private:
     size_t m_pacing_threshold = 0;    // Frame size threshold for pacing
     int m_packets_per_burst = 0;      // Packets before pause
     int m_burst_delay_us = 0;         // Microseconds to pause
+
+    // UDP feedback path (drains rx_queue + handles NACK/keyframe-request)
+    std::thread m_feedback_thread;
+    std::atomic<bool> m_feedback_running{false};
+    std::mutex m_feedback_cb_mutex;
+    std::function<void()> m_keyframe_request_cb;
+    std::atomic<uint64_t> m_feedback_packets{0};
+    std::atomic<uint64_t> m_keyframe_requests_via_udp{0};
 };
 
 // Video packet header (16 bytes)
@@ -78,5 +98,19 @@ constexpr uint16_t VIDEO_MAGIC = 0x5354;
 constexpr uint8_t FLAG_KEYFRAME = 0x01;
 constexpr uint8_t FLAG_START_OF_FRAME = 0x02;
 constexpr uint8_t FLAG_END_OF_FRAME = 0x04;
+
+// UDP feedback packet sent client -> server on the video port.
+// 4 bytes: magic(2) + type(1) + reserved(1). Anything not matching this
+// is silently drained (e.g. legacy 1-byte client init "punch" packets).
+constexpr uint16_t FEEDBACK_MAGIC = 0x4246;  // "FB" little-endian
+constexpr uint8_t  FEEDBACK_TYPE_KEYFRAME_REQUEST = 0x01;
+#pragma pack(push, 1)
+struct FeedbackPacket {
+    uint16_t magic;
+    uint8_t  type;
+    uint8_t  reserved;
+};
+#pragma pack(pop)
+static_assert(sizeof(FeedbackPacket) == 4, "FeedbackPacket must be 4 bytes");
 
 }  // namespace stream_tablet
