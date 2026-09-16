@@ -40,7 +40,11 @@ class ConnectionManager {
         val audioSampleRate: Int = 48000,
         val audioChannels: Int = 2,
         val audioFrameMs: Int = 10,
-        val codecType: Int = 0  // 0=AV1, 1=HEVC, 2=H264
+        val codecType: Int = 0,  // 0=AV1, 1=HEVC, 2=H264
+        // Codec configuration record (av1C / hvcC) from the encoder. Hardware
+        // decoders re-parse this from the bitstream; stricter software ones
+        // need it as csd-0 at configure() time.
+        val extradata: ByteArray? = null
     ) {
         val audioEnabled: Boolean get() = audioPort != 0
     }
@@ -407,7 +411,19 @@ class ConnectionManager {
             Log.i(TAG, "Codec: $codecName (type=$codecType)")
         }
 
-        return ServerConfig(width, height, videoPort, inputPort, audioPort, audioSampleRate, audioChannels, audioFrameMs, codecType)
+        // Optional trailer: [extradata_len:2][extradata:N]
+        var extradata: ByteArray? = null
+        if (data.size >= 17) {
+            val len = buffer.short.toInt() and 0xFFFF
+            if (len in 1..(data.size - 17)) {
+                val cfg = ByteArray(len)
+                buffer.get(cfg)
+                extradata = cfg
+                Log.i(TAG, "Codec config record: $len bytes")
+            }
+        }
+
+        return ServerConfig(width, height, videoPort, inputPort, audioPort, audioSampleRate, audioChannels, audioFrameMs, codecType, extradata)
     }
 
     fun getConfig(): ServerConfig {

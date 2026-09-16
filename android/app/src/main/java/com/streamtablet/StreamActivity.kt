@@ -312,7 +312,13 @@ class StreamActivity : AppCompatActivity() {
             val codecType = VideoDecoder.CodecType.fromId(config.codecType)
             android.util.Log.i("StreamActivity", "Creating ${codecType.displayName} decoder")
 
-            val newDecoder = VideoDecoder(holder.surface, config.width, config.height, codecType)
+            val newDecoder = VideoDecoder(holder.surface, config.width, config.height,
+                codecType, config.extradata, connectionManager.preferredFps)
+            newDecoder.forceSoftware = try {
+                val c = Class.forName("android.os.SystemProperties")
+                c.getMethod("get", String::class.java)
+                    .invoke(null, "debug.streamtablet.swdec") as String == "1"
+            } catch (e: Exception) { false }
             newDecoder.setKeyframeRequestCallback {
                 connectionManager.requestKeyframe()
             }
