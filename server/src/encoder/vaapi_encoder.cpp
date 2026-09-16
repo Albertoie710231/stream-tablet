@@ -123,14 +123,19 @@ static bool try_encoder_on_device(const char* device, const char* encoder_name,
     (*codec_ctx)->thread_count = 1;  // Single thread for lowest latency
 
     // VAAPI-specific settings.
-    // async_depth is the single biggest lever on this pipeline. At 1 the encode
-    // is fully synchronous: avcodec_send_frame blocks ~7.5ms on a 2960x1848 AV1
-    // frame, and that sits on the capture loop's critical path. At 2 the GPU
-    // works in the background and send drops to ~0.15ms, at the cost of one
-    // frame of output latency. That headroom is what makes >90fps reachable at
-    // all — the old 8.7ms pipeline could not fit a 120fps budget of 8.33ms.
-    // Measured on an Arc B580: encode 7.86ms -> 0.43ms, 120fps sustained.
-    int async_depth = 2;
+    // async_depth trades latency for throughput. At 1 the encode is fully
+    // synchronous: avcodec_send_frame blocks ~8ms on a 2960x1848 AV1 frame,
+    // on the capture loop's critical path. At 2 the GPU works in the
+    // background and send drops to ~0.15ms, at the cost of one frame of
+    // output latency (16.7ms at 60fps).
+    //
+    // Default 1: this is an interactive remote display, and the extra frame is
+    // felt directly when drawing with a stylus. At 60fps the synchronous
+    // encode fits the 16.7ms budget with room to spare.
+    //
+    // Set STREAM_TABLET_ASYNC=2 for >90fps: a 120fps budget is 8.33ms, which a
+    // blocking ~8ms encode cannot fit.
+    int async_depth = 1;
     if (const char* e = std::getenv("STREAM_TABLET_ASYNC")) async_depth = atoi(e);
     if (async_depth < 1) async_depth = 1;
     av_opt_set_int((*codec_ctx)->priv_data, "async_depth", async_depth, 0);
