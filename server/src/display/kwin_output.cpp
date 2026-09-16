@@ -38,6 +38,45 @@ std::string config_path() {
     return base + "/.cache/stream-tablet-display";
 }
 
+// Returns the refresh rate of the output's currently active mode (marked '*'),
+// or 0 if it cannot be determined.
+double active_refresh(int id) {
+    std::string clean = strip_ansi(run_capture("kscreen-doctor -o 2>/dev/null"));
+    // Find the block for this output, then the mode token ending in '*'.
+    std::string needle = "Output: " + std::to_string(id) + " ";
+    auto pos = clean.find(needle);
+    if (pos == std::string::npos) return 0.0;
+    auto end = clean.find("\nOutput: ", pos + 1);
+    std::string block = clean.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+
+    std::regex active_re(R"((\d+)x(\d+)@([0-9.]+)\*)");
+    std::smatch m;
+    if (std::regex_search(block, m, active_re)) {
+        return std::stod(m[3]);
+    }
+    return 0.0;
+}
+
+// True if the output already advertises a mode at this size and (rounded)
+// refresh, so we do not pile up a fresh custom mode on every connect.
+bool has_mode(int id, int width, int height, int fps) {
+    std::string clean = strip_ansi(run_capture("kscreen-doctor -o 2>/dev/null"));
+    std::string needle = "Output: " + std::to_string(id) + " ";
+    auto pos = clean.find(needle);
+    if (pos == std::string::npos) return false;
+    auto end = clean.find("\nOutput: ", pos + 1);
+    std::string block = clean.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+
+    std::string size = std::to_string(width) + "x" + std::to_string(height) + "@";
+    size_t p = 0;
+    while ((p = block.find(size, p)) != std::string::npos) {
+        p += size.size();
+        double r = atof(block.c_str() + p);
+        if (r >= fps - 1.0 && r < fps + 1.0) return true;
+    }
+    return false;
+}
+
 bool find_virtual_output_id(int& id_out) {
     std::string raw = run_capture("kscreen-doctor -o 2>/dev/null");
     if (raw.empty()) {
@@ -73,12 +112,26 @@ bool apply_virtual_output_mode(int width, int height, int fps) {
     // kscreen-doctor expects millihertz.
     int mhz = fps * 1000;
 
-    char add_cmd[256];
-    snprintf(add_cmd, sizeof(add_cmd),
-             "kscreen-doctor output.%d.addCustomMode.%d.%d.%d.reduced",
-             id, width, height, mhz);
-    // Ignore error: mode may already exist.
-    run_silent(add_cmd);
+    // Only create a custom mode if nothing suitable exists. addCustomMode
+    // computes slightly different timings each call, so calling it every
+    // connect accumulates a new near-duplicate mode forever.
+    if (!has_mode(id, width, height, fps)) {
+        char add_cmd[256];
+        snprintf(add_cmd, sizeof(add_cmd),
+                 "kscreen-doctor output.%d.addCustomMode.%d.%d.%d.reduced",
+                 id, width, height, mhz);
+        run_silent(add_cmd);
+    }
+
+    // Already at the requested refresh? Then don't touch it — re-setting the
+    // mode makes KWin tear the screencast stream down and renegotiate, which
+    // is how the stream ends up pinned to the pre-switch refresh rate.
+    double before = active_refresh(id);
+    if (before >= fps - 1.0 && before < fps + 1.0) {
+        LOG_INFO("Virtual output %d already at %dx%d@%.2f, leaving it alone",
+                 id, width, height, before);
+        return true;
+    }
 
     char set_cmd[256];
     snprintf(set_cmd, sizeof(set_cmd),
@@ -91,9 +144,22 @@ bool apply_virtual_output_mode(int width, int height, int fps) {
         return false;
     }
 
-    LOG_INFO("Applied mode %dx%d@%d to virtual output %d", width, height, fps, id);
-    // Give KWin a moment to settle before the capture pipeline initializes.
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    // Wait until KWin reports the new refresh rather than guessing at 200ms.
+    // If we reconnect the PipeWire stream too early it negotiates against the
+    // OLD mode and caps max_framerate there for the whole session.
+    double now_hz = 0.0;
+    for (int i = 0; i < 40; i++) {  // up to ~2s
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        now_hz = active_refresh(id);
+        if (now_hz >= fps - 1.0 && now_hz < fps + 1.0) break;
+    }
+
+    if (now_hz < fps - 1.0 || now_hz >= fps + 1.0) {
+        LOG_WARN("Virtual output %d did not reach %d Hz (now %.2f Hz) — "
+                 "capture will be capped at the lower rate", id, fps, now_hz);
+    } else {
+        LOG_INFO("Applied mode %dx%d@%.2f to virtual output %d", width, height, now_hz, id);
+    }
     return true;
 }
 
