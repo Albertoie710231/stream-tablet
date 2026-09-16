@@ -69,6 +69,15 @@ class StreamActivity : AppCompatActivity() {
 
     // FPS tracking
     private var fpsJob: Job? = null
+
+    // The Surface is destroyed and recreated whenever the view is re-laid out —
+    // which the soft keyboard does every time it opens or closes. Only the
+    // decoder may be rebuilt on that path. The video receive loop, the input
+    // channel and audio belong to the *connection*, not the surface: starting
+    // them again spawns a second consumer of the same queue, so packets and
+    // input events get split between rival loops and the stream stalls.
+    private var videoJob: Job? = null
+    private var connectionPipelinesStarted = false
     @Volatile
     private var framesReceived = 0
     @Volatile
@@ -308,31 +317,38 @@ class StreamActivity : AppCompatActivity() {
             decoder = newDecoder
             newDecoder.start()
 
-            // Request a keyframe to start fresh
+            // Request a keyframe to start fresh — the new decoder discards
+            // everything until it sees one.
             connectionManager.requestKeyframe()
 
-            // Start receiving video
-            lifecycleScope.launch(Dispatchers.IO) {
-                receiveVideo()
+            // Everything below belongs to the connection, not the surface, so
+            // it must run exactly once no matter how often the surface is
+            // recreated.
+            if (!connectionPipelinesStarted) {
+                connectionPipelinesStarted = true
+
+                videoJob = lifecycleScope.launch(Dispatchers.IO) {
+                    receiveVideo()
+                }
+
+                lifecycleScope.launch(Dispatchers.IO) {
+                    connectionManager.connectInput()
+                }
+
+                if (config.audioEnabled) {
+                    startAudio(config)
+                }
+
+                startFpsOverlay()
+            } else {
+                android.util.Log.i("StreamActivity",
+                    "Surface recreated - decoder rebuilt, existing pipelines kept")
             }
 
-            // Connect input channel
-            lifecycleScope.launch(Dispatchers.IO) {
-                connectionManager.connectInput()
-            }
-
-            // Start audio if enabled
-            if (config.audioEnabled) {
-                startAudio(config)
-            }
-
-            // Hide loading indicator and start FPS counter
+            // Hide loading indicator
             runOnUiThread {
                 binding.loadingIndicator.visibility = View.GONE
             }
-
-            // Start FPS overlay update
-            startFpsOverlay()
 
         } catch (e: Exception) {
             android.util.Log.e("StreamActivity", "Error starting decoder", e)
@@ -542,6 +558,8 @@ class StreamActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        connectionPipelinesStarted = false
+        videoJob?.cancel()
         fpsJob?.cancel()
         stopAudio()
         connectionManager.disconnect()
