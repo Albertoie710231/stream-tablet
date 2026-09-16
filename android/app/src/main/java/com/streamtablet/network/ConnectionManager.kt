@@ -17,7 +17,18 @@ class ConnectionManager {
     companion object {
         private const val TAG = "ConnectionManager"
         private const val VIDEO_MAGIC: Short = 0x5354  // "ST"
-        private const val PACKET_QUEUE_SIZE = 500  // Buffer ~500 packets
+        // Sized to absorb one keyframe burst, and no larger. A single AV1
+        // keyframe at 2960x1848 is 400-700KB = 350-600 packets, so the old
+        // 500-entry queue was ~94% consumed by one keyframe and overflowed as
+        // soon as inter frames arrived alongside it — dropping packets and
+        // corrupting the picture until the next keyframe.
+        //
+        // Going much bigger is not free: the queue drains FIFO, so any backlog
+        // that does not clear becomes latency. At ~30 packets per inter frame,
+        // 4096 entries is ~136 frames, over two seconds of delay. 1024 covers
+        // the worst keyframe seen (593 packets) plus inter frames arriving
+        // alongside it, and drains back to near-empty between bursts.
+        private const val PACKET_QUEUE_SIZE = 1024
     }
 
     data class ServerConfig(
@@ -121,7 +132,7 @@ class ConnectionManager {
         Log.i(TAG, "Video socket created on local port ${videoSocket?.localPort}, requested 4MB buffer, actual=${actualBuffer/1024}KB")
 
         // Connect control channel
-        controlSocket = Socket(address, port)
+        controlSocket = Socket(address, port).apply { tcpNoDelay = true }
         controlIn = DataInputStream(controlSocket!!.getInputStream())
         controlOut = DataOutputStream(controlSocket!!.getOutputStream())
 
@@ -297,11 +308,21 @@ class ConnectionManager {
         val config = serverConfig ?: return
 
         try {
-            inputSocket = Socket(serverAddress, config.inputPort)
+            inputSocket = Socket(serverAddress, config.inputPort).apply {
+                // Stylus points are 28-byte writes. Without TCP_NODELAY, Nagle
+                // holds each one until the previous is ACKed, so strokes arrive
+                // batched at one RTT per point — which is felt directly as lag
+                // and stair-stepping when drawing. The server already sets
+                // TCP_NODELAY on its side; this is the direction that matters.
+                tcpNoDelay = true
+            }
             inputOut = DataOutputStream(inputSocket!!.getOutputStream())
 
             // Start input sending thread
-            inputThread = Thread({ inputSendLoop() }, "InputSender").apply { start() }
+            inputThread = Thread({
+                Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY)
+                inputSendLoop()
+            }, "InputSender").apply { start() }
 
             Log.i(TAG, "Input channel connected")
         } catch (e: Exception) {
@@ -510,7 +531,7 @@ class ConnectionManager {
             // Log stats every 5 seconds
             val now = System.currentTimeMillis()
             if (now - lastStatsLog >= 5000) {
-                Log.i(TAG, "Network stats: packets=$packetsReceived, frames=$framesCompleted, incomplete=$framesIncomplete, keyframeReqs=$keyframeRequests")
+                Log.i(TAG, "Network stats: packets=$packetsReceived, frames=$framesCompleted, incomplete=$framesIncomplete, keyframeReqs=$keyframeRequests, pktQueue=${packetQueue.size}/$PACKET_QUEUE_SIZE")
                 packetsReceived = 0
                 framesCompleted = 0
                 framesIncomplete = 0
