@@ -323,8 +323,13 @@ class StreamActivity : AppCompatActivity() {
             // needed to actually leave 60Hz.
             applyContentFrameRate(holder.surface, connectionManager.preferredFps)
 
+            val panelHz = try {
+                (if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R)
+                    display?.refreshRate else windowManager.defaultDisplay.refreshRate) ?: 0f
+            } catch (e: Exception) { 0f }
+
             val newDecoder = VideoDecoder(holder.surface, config.width, config.height,
-                codecType, config.extradata, connectionManager.preferredFps)
+                codecType, config.extradata, connectionManager.preferredFps, true, panelHz)
             newDecoder.forceSoftware = try {
                 val c = Class.forName("android.os.SystemProperties")
                 c.getMethod("get", String::class.java)

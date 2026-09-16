@@ -3,6 +3,9 @@ package com.streamtablet.video
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaCodecList
+import android.os.Handler
+import android.os.HandlerThread
+import android.view.Choreographer
 import android.media.MediaFormat
 import android.util.Log
 import android.view.Surface
@@ -19,12 +22,15 @@ class VideoDecoder(
     private val height: Int,
     private val codecType: CodecType,
     private val csd: ByteArray? = null,
-    private val targetFps: Int = 60
+    private val targetFps: Int = 60,
+    private val framePacing: Boolean = true,
+    private val displayRefreshHz: Float = 0f
 ) {
     companion object {
         private const val TAG = "VideoDecoder"
         private const val INPUT_TIMEOUT_US = 10000L   // 10ms for input
         private const val OUTPUT_TIMEOUT_US = 5000L   // 5ms for output (balance latency vs CPU)
+        private const val OUTPUT_QUEUE_LIMIT = 2
     }
 
     enum class CodecType(val mimeType: String, val displayName: String) {
@@ -76,6 +82,22 @@ class VideoDecoder(
     // of submit timestamps pairs them exactly — the PTS cannot be used as a key
     // because it is millisecond-quantised and collides at 120fps.
     private val submitTimesNs = ConcurrentLinkedQueue<Long>()
+
+    // --- vsync-aligned presentation ---
+    // Releasing a decoded frame the instant it is ready means it lands on
+    // whichever vsync happens to be next, so decode-time variance and the
+    // source/panel clock drift both show up as judder. Instead the output loop
+    // parks finished buffers here and a Choreographer callback releases one per
+    // vsync with a presentation timestamp. Slip then lands on a frame boundary,
+    // where it is invisible, instead of mid-motion.
+    //
+    // The queue is deliberately tiny: it exists to absorb a late frame, not to
+    // buffer. Moonlight uses the same limit.
+    private val outputBufferQueue = java.util.concurrent.LinkedBlockingQueue<Int>(OUTPUT_QUEUE_LIMIT)
+    private var choreographerThread: HandlerThread? = null
+    private var vsyncPeriodNs = 8_333_333L
+    @Volatile
+    private var pacingActive = false
     private var decLatSumUs = 0L
     private var decLatCount = 0
     private var decLatMaxUs = 0L
@@ -141,6 +163,8 @@ class VideoDecoder(
             // Start decoder threads
             decoderThread = Thread({ decoderLoop() }, "${codecType.displayName}DecoderInput").apply { start() }
             outputThread = Thread({ outputLoop() }, "${codecType.displayName}DecoderOutput").apply { start() }
+
+            if (framePacing) startChoreographer()
 
             Log.i(TAG, "${codecType.displayName} decoder started: ${width}x${height}")
 
@@ -332,7 +356,8 @@ class VideoDecoder(
                 val outputIndex = codec.dequeueOutputBuffer(bufferInfo, OUTPUT_TIMEOUT_US)
                 when {
                     outputIndex >= 0 -> {
-                        // Pair this output with its input before rendering.
+                        // Decode latency: pair this output with its input. Always
+                        // measured — it is independent of when the frame is shown.
                         val submitNs = submitTimesNs.poll()
                         if (submitNs != null) {
                             val latUs = (System.nanoTime() - submitNs) / 1000
@@ -342,30 +367,7 @@ class VideoDecoder(
                             val b = (latUs / 2000L).toInt().coerceIn(0, decLatBuckets.size - 1)
                             decLatBuckets[b]++
                         }
-
-                        // Release to surface for rendering
-                        codec.releaseOutputBuffer(outputIndex, true)
-                        framesDecoded++
-
-                        // Presentation cadence. Throughput counters cannot see
-                        // judder: frames can arrive at a perfect 120/s and still
-                        // be handed to the compositor unevenly, which is what the
-                        // eye actually notices. Measure the gap between renders.
-                        val nowNs = System.nanoTime()
-                        if (lastRenderNs != 0L) {
-                            val gapUs = (nowNs - lastRenderNs) / 1000
-                            renderGapSumUs += gapUs
-                            renderGapCount++
-                            if (gapUs > renderGapMaxUs) renderGapMaxUs = gapUs
-                            // A frame late by more than half an interval will be
-                            // held an extra vsync and read as a stutter.
-                            if (gapUs > targetGapUs * 3 / 2) renderLateFrames++
-                        }
-                        lastRenderNs = nowNs
-
                         if (decLatCount >= 300) {
-                            val avgMs = decLatSumUs / decLatCount / 1000.0
-                            val maxMs = decLatMaxUs / 1000.0
                             val hist = StringBuilder()
                             for (i in decLatBuckets.indices) {
                                 if (decLatBuckets[i] == 0) continue
@@ -374,20 +376,29 @@ class VideoDecoder(
                                 hist.append(" ").append(lbl).append("ms:").append(decLatBuckets[i])
                             }
                             Log.i(TAG, "DECODE LATENCY (" + codecType.displayName + "): avg=" +
-                                    String.format("%.2f", avgMs) + "ms max=" +
-                                    String.format("%.2f", maxMs) + "ms n=" + decLatCount + " |" + hist)
+                                    String.format("%.2f", decLatSumUs / decLatCount / 1000.0) + "ms max=" +
+                                    String.format("%.2f", decLatMaxUs / 1000.0) + "ms n=" + decLatCount + " |" + hist)
                             decLatSumUs = 0; decLatCount = 0; decLatMaxUs = 0
                             java.util.Arrays.fill(decLatBuckets, 0)
                         }
 
-                        if (renderGapCount >= 300) {
-                            val avg = renderGapSumUs / renderGapCount
-                            Log.i(TAG, "Render cadence: avg=${avg / 1000.0}ms " +
-                                    "max=${renderGapMaxUs / 1000.0}ms " +
-                                    "late=$renderLateFrames/$renderGapCount " +
-                                    "(target ${targetGapUs / 1000.0}ms)")
-                            renderGapSumUs = 0; renderGapCount = 0
-                            renderGapMaxUs = 0; renderLateFrames = 0
+                        framesDecoded++
+
+                        if (pacingActive) {
+                            // Hand off to the Choreographer callback, which owns
+                            // both the release and the cadence measurement. If the
+                            // queue is full we are ahead of the display, so discard
+                            // the oldest without rendering rather than stall the
+                            // codec by holding its buffers.
+                            if (!outputBufferQueue.offer(outputIndex)) {
+                                outputBufferQueue.poll()?.let {
+                                    try { codec.releaseOutputBuffer(it, false) } catch (e: Exception) {}
+                                }
+                                outputBufferQueue.offer(outputIndex)
+                            }
+                        } else {
+                            codec.releaseOutputBuffer(outputIndex, true)
+                            recordRender()
                         }
                     }
                     outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
@@ -409,8 +420,72 @@ class VideoDecoder(
         }
     }
 
+    private fun startChoreographer() {
+        // Use the real panel refresh, not the stream rate — they are not the
+        // same number and the presentation timestamp has to be in the display's
+        // terms.
+        val hz = if (displayRefreshHz > 1f) displayRefreshHz else 120f
+        vsyncPeriodNs = (1_000_000_000.0 / hz).toLong()
+
+        val t = HandlerThread("${codecType.displayName}Choreographer")
+        t.start()
+        choreographerThread = t
+        Handler(t.looper).post {
+            pacingActive = true
+            Log.i(TAG, "Frame pacing on: panel " + String.format("%.3f", hz) +
+                    "Hz, vsync " + (vsyncPeriodNs / 1000) + "us")
+            Choreographer.getInstance().postFrameCallback(object : Choreographer.FrameCallback {
+                override fun doFrame(frameTimeNanos: Long) {
+                    if (!isRunning || codecFailed) return
+
+                    // Release exactly one buffer per vsync, timestamped for the
+                    // NEXT vsync. Android asks for the buffer to be handed over
+                    // ahead of its intended display time — passing the current
+                    // vsync means "show this now", which is already late and
+                    // lands the frame on the following refresh anyway, but
+                    // without the compositor knowing that was the intent.
+                    val idx = outputBufferQueue.poll()
+                    if (idx != null) {
+                        try {
+                            codec?.releaseOutputBuffer(idx, frameTimeNanos + vsyncPeriodNs)
+                            recordRender()
+                        } catch (e: IllegalStateException) {
+                            codecFailed = true
+                            return
+                        }
+                    }
+                    Choreographer.getInstance().postFrameCallback(this)
+                }
+            })
+        }
+    }
+
+    private fun recordRender() {
+        val nowNs = System.nanoTime()
+        if (lastRenderNs != 0L) {
+            val gapUs = (nowNs - lastRenderNs) / 1000
+            renderGapSumUs += gapUs
+            renderGapCount++
+            if (gapUs > renderGapMaxUs) renderGapMaxUs = gapUs
+            if (gapUs > targetGapUs * 3 / 2) renderLateFrames++
+        }
+        lastRenderNs = nowNs
+        if (renderGapCount >= 300) {
+            Log.i(TAG, "Render cadence (" + (if (pacingActive) "paced" else "immediate") + "): avg=" +
+                    String.format("%.2f", renderGapSumUs / renderGapCount / 1000.0) + "ms max=" +
+                    String.format("%.2f", renderGapMaxUs / 1000.0) + "ms late=" +
+                    renderLateFrames + "/" + renderGapCount)
+            renderGapSumUs = 0; renderGapCount = 0
+            renderGapMaxUs = 0; renderLateFrames = 0
+        }
+    }
+
     fun stop() {
         isRunning = false
+        pacingActive = false
+        choreographerThread?.quitSafely()
+        choreographerThread = null
+        outputBufferQueue.clear()
 
         decoderThread?.interrupt()
         outputThread?.interrupt()
