@@ -58,6 +58,13 @@ public:
     // Get backend name (e.g., "VAAPI", "CUDA")
     virtual const char* get_name() const = 0;
 
+    // Codec configuration record (av1C / hvcC). Empty if the encoder did not
+    // produce one. Sent to the client so it can populate csd-0.
+    virtual const std::vector<uint8_t>& get_extradata() const {
+        static const std::vector<uint8_t> empty;
+        return empty;
+    }
+
     // True only when the backend actually built a zero-copy import pipeline.
     // A DMA-BUF capture paired with an encoder that returns false here cannot
     // encode anything, so the caller must renegotiate capture to the CPU path.

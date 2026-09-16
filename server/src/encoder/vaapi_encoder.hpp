@@ -25,6 +25,7 @@ public:
     bool is_initialized() const override { return m_impl != nullptr; }
     uint8_t get_codec_type() const override { return m_actual_codec; }
     const char* get_name() const override { return "VAAPI"; }
+    const std::vector<uint8_t>& get_extradata() const override { return m_extradata; }
     bool uses_dmabuf_input() const override { return m_dmabuf_active; }
 
 private:
@@ -41,6 +42,7 @@ private:
     // documented thread affinity, even though the server now only calls it
     // from the capture loop.
     std::atomic<bool> m_force_keyframe{false};
+    std::vector<uint8_t> m_extradata;   // codec configuration record (av1C etc.)
     uint8_t m_actual_codec = 0;  // 0=AV1, 1=HEVC, 2=H264
 
     // Zero-copy path: set when KWin gave us DMA-BUFs and the GPU import

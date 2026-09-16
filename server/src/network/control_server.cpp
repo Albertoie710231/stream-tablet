@@ -245,7 +245,8 @@ bool ControlServer::send_config_with_audio(int screen_width, int screen_height, 
 
 bool ControlServer::send_config_full(int screen_width, int screen_height, int video_port, int input_port,
                                       int audio_port, int audio_sample_rate, int audio_channels, int audio_frame_ms,
-                                      uint8_t codec_type) {
+                                      uint8_t codec_type,
+                                      const std::vector<uint8_t>& extradata) {
     // Full config: 15 bytes
     // [width:2][height:2][video_port:2][input_port:2][audio_port:2][sample_rate:2][channels:1][frame_ms:1][codec:1]
     std::vector<uint8_t> data(15);
@@ -265,12 +266,23 @@ bool ControlServer::send_config_full(int screen_width, int screen_height, int vi
     data[13] = static_cast<uint8_t>(audio_frame_ms);
     data[14] = codec_type;
 
+    // Optional trailer: [extradata_len:2][extradata:N]. Older clients stop
+    // reading at byte 15 and are unaffected.
+    if (!extradata.empty() && extradata.size() <= 0xFFFF) {
+        data.push_back((extradata.size() >> 8) & 0xFF);
+        data.push_back(extradata.size() & 0xFF);
+        data.insert(data.end(), extradata.begin(), extradata.end());
+    }
+
     const char* codec_names[] = {"AV1", "HEVC", "H.264"};
     const char* codec_name = (codec_type < 3) ? codec_names[codec_type] : "unknown";
 
     LOG_INFO("Sending config: %dx%d, video=%d, input=%d, audio=%d, %dHz, %dch, %dms, codec=%s",
              screen_width, screen_height, video_port, input_port, audio_port,
              audio_sample_rate, audio_channels, audio_frame_ms, codec_name);
+    if (!extradata.empty()) {
+        LOG_INFO("  + codec config record: %zu bytes", extradata.size());
+    }
 
     return send_message(MSG_CONFIG_RESPONSE, data.data(), data.size());
 }

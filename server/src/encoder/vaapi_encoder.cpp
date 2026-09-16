@@ -141,6 +141,19 @@ static bool try_encoder_on_device(const char* device, const char* encoder_name,
     av_opt_set_int((*codec_ctx)->priv_data, "async_depth", async_depth, 0);
     av_opt_set_int((*codec_ctx)->priv_data, "idr_interval", config.gop_size, 0);
 
+    // AV1/HEVC tiles decode independently, so a multi-tile frame can be split
+    // across the decoder's cores. FFmpeg defaults to the *minimum* tile count,
+    // which leaves a complex frame to be decoded serially — the long tail in
+    // client decode latency. Costs a little compression efficiency.
+    if (const char* e = std::getenv("STREAM_TABLET_TILES")) {
+        av_opt_set((*codec_ctx)->priv_data, "tiles", e, 0);
+    }
+    // Hard cap on encoded frame size. Bounds the decoder's worst case directly,
+    // at the cost of quality on the frames that hit the cap.
+    if (const char* e = std::getenv("STREAM_TABLET_MAX_FRAME_SIZE")) {
+        av_opt_set_int((*codec_ctx)->priv_data, "max_frame_size", atoi(e), 0);
+    }
+
     // Intel's fixed-function encode path (VDENC). Usually far faster than the
     // render-based path; on some parts it is the only one that supports AV1.
     if (const char* e = std::getenv("STREAM_TABLET_LOWPOWER")) {
@@ -216,6 +229,19 @@ static bool try_encoder_on_device(const char* device, const char* encoder_name,
 
     (*codec_ctx)->hw_frames_ctx = av_buffer_ref(*hw_frames_ctx);
 
+    // NOTE: deliberately NOT setting AV_CODEC_FLAG_GLOBAL_HEADER.
+    //
+    // It moves the parameter sets out of the bitstream into extradata, and
+    // FFmpeg emits those in hvcC/av1C (length-prefixed) form while MediaCodec
+    // expects Annex-B with start codes as csd-0. Measured on this pipeline it
+    // doubled HEVC decode latency (5.2ms -> 10.6ms average, 9ms -> 28ms max),
+    // because the decoder lost its in-band parameter sets and could not use the
+    // record it was given instead.
+    //
+    // Every hardware decoder here re-parses parameter sets from the stream, so
+    // in-band is both correct and faster. The csd-0 plumbing on the wire is
+    // left in place (harmlessly inert) for a decoder that ever needs it.
+    //
     // Try to open encoder - this is where we find out if the device supports it
     ret = avcodec_open2(*codec_ctx, codec, nullptr);
     if (ret < 0) {
@@ -312,6 +338,13 @@ bool VAAPIEncoder::init(const EncoderConfig& config) {
 
                 m_impl->packet = av_packet_alloc();
 
+                if (m_impl->codec_ctx->extradata && m_impl->codec_ctx->extradata_size > 0) {
+                    m_extradata.assign(m_impl->codec_ctx->extradata,
+                                       m_impl->codec_ctx->extradata + m_impl->codec_ctx->extradata_size);
+                    LOG_INFO("Codec config record: %d bytes", m_impl->codec_ctx->extradata_size);
+                } else {
+                    LOG_WARN("Encoder produced no codec config record (extradata)");
+                }
                 LOG_INFO("VAAPI encoder initialized: %dx%d @ %d fps, %d bps, codec=%s, input=%s",
                          config.width, config.height, config.framerate, config.bitrate,
                          codec.display_name,
