@@ -556,8 +556,27 @@ class ConnectionManager {
         }
     }
 
+    private var inputDropped = 0
+    private var lastInputDropLog = 0L
+
     fun sendInput(event: InputEvent) {
-        inputQueue.offer(event)
+        if (inputQueue.offer(event)) return
+
+        // Queue full. Never silently drop the newest event: a lost STYLUS_UP
+        // leaves the pen logically down on the server, so the next stroke is
+        // drawn as one continuous line from wherever the last one ended.
+        // Discard the oldest (an intermediate MOVE) instead.
+        inputQueue.poll()
+        if (!inputQueue.offer(event)) {
+            inputDropped++
+        }
+
+        val now = System.currentTimeMillis()
+        if (now - lastInputDropLog > 1000) {
+            Log.w(TAG, "Input queue saturated - shed ${inputDropped + 1} event(s)")
+            inputDropped = 0
+            lastInputDropLog = now
+        }
     }
 
     private fun inputSendLoop() {
