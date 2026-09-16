@@ -48,6 +48,21 @@ class ConnectionManager {
     private var inputSocket: Socket? = null
     private var inputOut: DataOutputStream? = null
 
+    // Tablet physical display (set before connect)
+    var tabletWidth: Int = 2800
+    var tabletHeight: Int = 1752
+
+    // Streaming preferences (set before connect)
+    var preferredCodec: Int = 0       // 0=auto, 1=av1, 2=hevc, 3=h264
+    var preferredFps: Int = 60        // 1-120
+    var preferredQuality: Int = 0     // 0=auto, 1=low, 2=balanced, 3=high
+    var preferredCqp: Int = 24        // 1-51
+    var preferredBitrate: Int = 0     // 0=auto, bps
+    var preferredPacing: Int = 0      // 0=auto, 1=none, 2=light, 3=aggressive, 4=keyframe
+    var preferredAudioEnabled: Boolean = true
+    var preferredAudioExclusive: Boolean = true  // Mute PC speakers while streaming
+    var preferredAudioBitrate: Int = 128000  // bps
+
     private var serverAddress: String = ""
     private var serverPort: Int = 9500
     private var serverConfig: ServerConfig? = null
@@ -295,19 +310,37 @@ class ConnectionManager {
     }
 
     private fun sendConfigRequest() {
-        // Config request: [length:2][type:1][width:2][height:2][videoPort:2][inputPort:2]
-        val buffer = ByteBuffer.allocate(11).order(ByteOrder.BIG_ENDIAN)
-        buffer.putShort(9)  // length
+        // Config request: [length:2][type:1][data:22]
+        // Data: [width:2][height:2][videoPort:2][inputPort:2]
+        //       [codec:1][fps:1][quality:1][cqp:1][bitrate:4][pacing:1][audioEnabled:1][audioBitrate:4]
+        val buffer = ByteBuffer.allocate(25).order(ByteOrder.BIG_ENDIAN)
+        buffer.putShort(23) // length (type + 22 bytes data)
         buffer.put(0x03)    // MSG_CONFIG_REQUEST
 
-        // Request our tablet resolution (landscape)
-        buffer.putShort(2800)  // width (landscape)
-        buffer.putShort(1752)  // height (landscape)
-        buffer.putShort(videoSocket?.localPort?.toShort() ?: 0)  // our video port
+        // Tablet native resolution (from Display.getMode, landscape)
+        buffer.putShort(tabletWidth.toShort())
+        buffer.putShort(tabletHeight.toShort())
+        buffer.putShort(videoSocket?.localPort?.toShort() ?: 0)
         buffer.putShort(0)     // input port (server will tell us)
+
+        // Streaming preferences
+        buffer.put(preferredCodec.toByte())
+        buffer.put(preferredFps.toByte())
+        buffer.put(preferredQuality.toByte())
+        buffer.put(preferredCqp.toByte())
+        buffer.putInt(preferredBitrate)
+        buffer.put(preferredPacing.toByte())
+        // bit 0 = audio enabled, bit 1 = exclusive (mute PC speakers)
+        var audioFlags = 0
+        if (preferredAudioEnabled) audioFlags = audioFlags or 0x01
+        if (preferredAudioEnabled && preferredAudioExclusive) audioFlags = audioFlags or 0x02
+        buffer.put(audioFlags.toByte())
+        buffer.putInt(preferredAudioBitrate)
 
         controlOut?.write(buffer.array())
         controlOut?.flush()
+
+        Log.i(TAG, "Sent config request: codec=$preferredCodec, fps=$preferredFps, quality=$preferredQuality, cqp=$preferredCqp, bitrate=$preferredBitrate, pacing=$preferredPacing, audio=$preferredAudioEnabled")
     }
 
     private fun receiveConfig(): ServerConfig {
@@ -616,7 +649,8 @@ enum class InputEventType(val value: Byte) {
     STYLUS_UP(0x06),
     STYLUS_HOVER(0x07),
     KEY_DOWN(0x08),
-    KEY_UP(0x09)
+    KEY_UP(0x09),
+    SCROLL(0x0A)
 }
 
 data class InputEvent(

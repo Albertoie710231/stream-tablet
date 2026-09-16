@@ -14,6 +14,8 @@ extern "C" {
 #include <unistd.h>
 #include <dirent.h>
 #include <cstring>
+#include <cstdlib>
+#include <chrono>
 #include <algorithm>
 #include <vector>
 #include <string>
@@ -76,13 +78,30 @@ static bool try_encoder_on_device(const char* device, const char* encoder_name,
                                    const EncoderConfig& config,
                                    AVBufferRef** hw_device_ctx,
                                    AVBufferRef** hw_frames_ctx,
-                                   AVCodecContext** codec_ctx) {
+                                   AVCodecContext** codec_ctx,
+                                   VaapiDmaBufPipeline* dmabuf_pipeline,
+                                   bool* dmabuf_active) {
     const AVCodec* codec = avcodec_find_encoder_by_name(encoder_name);
     if (!codec) return false;
 
     // Try to create device context
     int ret = av_hwdevice_ctx_create(hw_device_ctx, AV_HWDEVICE_TYPE_VAAPI, device, nullptr, 0);
     if (ret < 0) return false;
+
+    // Zero-copy input: build the DMA-BUF -> VAAPI -> NV12 pipeline on this same
+    // device. If it fails for any reason we silently keep the CPU path, so a
+    // driver that can't import the negotiated modifier degrades instead of
+    // breaking the stream.
+    if (dmabuf_active) *dmabuf_active = false;
+    if (dmabuf_pipeline && config.dmabuf_input) {
+        if (dmabuf_pipeline->init(*hw_device_ctx, device, config.width, config.height,
+                                  config.drm_format, config.drm_modifier,
+                                  config.framerate)) {
+            if (dmabuf_active) *dmabuf_active = true;
+        } else {
+            dmabuf_pipeline->shutdown();
+        }
+    }
 
     // Create codec context
     *codec_ctx = avcodec_alloc_context3(codec);
@@ -103,12 +122,25 @@ static bool try_encoder_on_device(const char* device, const char* encoder_name,
     (*codec_ctx)->delay = 0;
     (*codec_ctx)->thread_count = 1;  // Single thread for lowest latency
 
-    // VAAPI-specific settings
-    // Use async_depth=4 for high FPS to allow pipelining (adds ~2-3 frames latency)
-    // Use async_depth=1 for lower FPS for minimum latency
-    int async_depth = (config.framerate > 90) ? 4 : 1;
+    // VAAPI-specific settings.
+    // async_depth is the single biggest lever on this pipeline. At 1 the encode
+    // is fully synchronous: avcodec_send_frame blocks ~7.5ms on a 2960x1848 AV1
+    // frame, and that sits on the capture loop's critical path. At 2 the GPU
+    // works in the background and send drops to ~0.15ms, at the cost of one
+    // frame of output latency. That headroom is what makes >90fps reachable at
+    // all — the old 8.7ms pipeline could not fit a 120fps budget of 8.33ms.
+    // Measured on an Arc B580: encode 7.86ms -> 0.43ms, 120fps sustained.
+    int async_depth = 2;
+    if (const char* e = std::getenv("STREAM_TABLET_ASYNC")) async_depth = atoi(e);
+    if (async_depth < 1) async_depth = 1;
     av_opt_set_int((*codec_ctx)->priv_data, "async_depth", async_depth, 0);
     av_opt_set_int((*codec_ctx)->priv_data, "idr_interval", config.gop_size, 0);
+
+    // Intel's fixed-function encode path (VDENC). Usually far faster than the
+    // render-based path; on some parts it is the only one that supports AV1.
+    if (const char* e = std::getenv("STREAM_TABLET_LOWPOWER")) {
+        av_opt_set_int((*codec_ctx)->priv_data, "low_power", atoi(e), 0);
+    }
 
     if (config.quality_mode == QualityMode::HIGH_QUALITY || config.quality_mode == QualityMode::AUTO) {
         // CQP mode - constant quality, variable bitrate
@@ -124,12 +156,12 @@ static bool try_encoder_on_device(const char* device, const char* encoder_name,
         (*codec_ctx)->rc_max_rate = config.bitrate * 2;
         (*codec_ctx)->rc_buffer_size = config.bitrate;
         // Quality preset - use fast for high FPS, medium otherwise
-        if (config.framerate > 90) {
-            av_opt_set((*codec_ctx)->priv_data, "preset", "fast", 0);
-        } else if (config.quality_mode == QualityMode::AUTO) {
-            av_opt_set((*codec_ctx)->priv_data, "preset", "medium", 0);
-        } else {
-            av_opt_set((*codec_ctx)->priv_data, "preset", "quality", 0);
+        // NOTE: "preset" is not a VAAPI encoder option (it belongs to QSV/NVENC).
+        // av1_vaapi, hevc_vaapi and h264_vaapi all reject it, so the calls that
+        // used to be here were silent no-ops. Speed on VAAPI comes from
+        // async_depth and rc_mode instead. h264_vaapi alone accepts "quality".
+        if (const char* e = std::getenv("STREAM_TABLET_PRESET")) {
+            av_opt_set((*codec_ctx)->priv_data, "preset", e, 0);
         }
     } else {
         // CBR mode - constant bitrate
@@ -138,31 +170,43 @@ static bool try_encoder_on_device(const char* device, const char* encoder_name,
         // Smaller buffer = lower latency (1 frame worth of data)
         (*codec_ctx)->rc_buffer_size = config.bitrate / config.framerate;
         av_opt_set((*codec_ctx)->priv_data, "rc_mode", "CBR", 0);
-        av_opt_set((*codec_ctx)->priv_data, "preset", "fast", 0);
-        av_opt_set((*codec_ctx)->priv_data, "tune", "zerolatency", 0);
+        // "preset"/"tune" are not VAAPI options — see the note above.
     }
 
-    // Create HW frames context
-    *hw_frames_ctx = av_hwframe_ctx_alloc(*hw_device_ctx);
-    if (!*hw_frames_ctx) {
-        avcodec_free_context(codec_ctx);
-        av_buffer_unref(hw_device_ctx);
-        return false;
-    }
+    // Frames context the encoder draws from. On the zero-copy path this is the
+    // VPP filter's output pool — the encoder reads the surfaces scale_vaapi
+    // wrote, so nothing is allocated or copied in between.
+    if (dmabuf_active && *dmabuf_active) {
+        AVBufferRef* vpp_out = dmabuf_pipeline->output_frames_ctx();
+        if (!vpp_out) {
+            avcodec_free_context(codec_ctx);
+            av_buffer_unref(hw_device_ctx);
+            dmabuf_pipeline->shutdown();
+            return false;
+        }
+        *hw_frames_ctx = av_buffer_ref(vpp_out);
+    } else {
+        *hw_frames_ctx = av_hwframe_ctx_alloc(*hw_device_ctx);
+        if (!*hw_frames_ctx) {
+            avcodec_free_context(codec_ctx);
+            av_buffer_unref(hw_device_ctx);
+            return false;
+        }
 
-    AVHWFramesContext* frames_ctx = (AVHWFramesContext*)(*hw_frames_ctx)->data;
-    frames_ctx->format = AV_PIX_FMT_VAAPI;
-    frames_ctx->sw_format = AV_PIX_FMT_NV12;
-    frames_ctx->width = config.width;
-    frames_ctx->height = config.height;
-    frames_ctx->initial_pool_size = 4;
+        AVHWFramesContext* frames_ctx = (AVHWFramesContext*)(*hw_frames_ctx)->data;
+        frames_ctx->format = AV_PIX_FMT_VAAPI;
+        frames_ctx->sw_format = AV_PIX_FMT_NV12;
+        frames_ctx->width = config.width;
+        frames_ctx->height = config.height;
+        frames_ctx->initial_pool_size = 4;
 
-    ret = av_hwframe_ctx_init(*hw_frames_ctx);
-    if (ret < 0) {
-        av_buffer_unref(hw_frames_ctx);
-        avcodec_free_context(codec_ctx);
-        av_buffer_unref(hw_device_ctx);
-        return false;
+        ret = av_hwframe_ctx_init(*hw_frames_ctx);
+        if (ret < 0) {
+            av_buffer_unref(hw_frames_ctx);
+            avcodec_free_context(codec_ctx);
+            av_buffer_unref(hw_device_ctx);
+            return false;
+        }
     }
 
     (*codec_ctx)->hw_frames_ctx = av_buffer_ref(*hw_frames_ctx);
@@ -173,6 +217,8 @@ static bool try_encoder_on_device(const char* device, const char* encoder_name,
         av_buffer_unref(hw_frames_ctx);
         avcodec_free_context(codec_ctx);
         av_buffer_unref(hw_device_ctx);
+        if (dmabuf_pipeline) dmabuf_pipeline->shutdown();
+        if (dmabuf_active) *dmabuf_active = false;
         return false;
     }
 
@@ -238,24 +284,40 @@ bool VAAPIEncoder::init(const EncoderConfig& config) {
             if (try_encoder_on_device(device.c_str(), codec.encoder_name, config,
                                        &m_impl->hw_device_ctx,
                                        &m_impl->hw_frames_ctx,
-                                       &m_impl->codec_ctx)) {
+                                       &m_impl->codec_ctx,
+                                       &m_dmabuf_pipeline,
+                                       &m_dmabuf_active)) {
                 LOG_INFO("Success! Using %s encoder on %s", codec.display_name, device.c_str());
                 m_actual_codec = codec.codec_id;
 
-                // Allocate frames
-                m_impl->sw_frame = av_frame_alloc();
-                m_impl->sw_frame->format = AV_PIX_FMT_NV12;
-                m_impl->sw_frame->width = config.width;
-                m_impl->sw_frame->height = config.height;
-                av_frame_get_buffer(m_impl->sw_frame, 32);
+                // Staging frames exist only for the CPU upload path. On the
+                // zero-copy path the VPP output surface goes straight to the
+                // encoder, and taking a surface from that pool here would just
+                // shrink it.
+                if (!m_dmabuf_active) {
+                    m_impl->sw_frame = av_frame_alloc();
+                    m_impl->sw_frame->format = AV_PIX_FMT_NV12;
+                    m_impl->sw_frame->width = config.width;
+                    m_impl->sw_frame->height = config.height;
+                    av_frame_get_buffer(m_impl->sw_frame, 32);
 
-                m_impl->hw_frame = av_frame_alloc();
-                av_hwframe_get_buffer(m_impl->hw_frames_ctx, m_impl->hw_frame, 0);
+                    m_impl->hw_frame = av_frame_alloc();
+                    av_hwframe_get_buffer(m_impl->hw_frames_ctx, m_impl->hw_frame, 0);
+                }
 
                 m_impl->packet = av_packet_alloc();
 
-                LOG_INFO("VAAPI encoder initialized: %dx%d @ %d fps, %d bps, codec=%s",
-                         config.width, config.height, config.framerate, config.bitrate, codec.display_name);
+                LOG_INFO("VAAPI encoder initialized: %dx%d @ %d fps, %d bps, codec=%s, input=%s",
+                         config.width, config.height, config.framerate, config.bitrate,
+                         codec.display_name,
+                         m_dmabuf_active ? "DMA-BUF zero-copy" : "CPU upload");
+                {
+                    int64_t lp = -1, ad = -1;
+                    av_opt_get_int(m_impl->codec_ctx->priv_data, "low_power", 0, &lp);
+                    av_opt_get_int(m_impl->codec_ctx->priv_data, "async_depth", 0, &ad);
+                    LOG_INFO("Encoder tuning: low_power=%lld async_depth=%lld",
+                             (long long)lp, (long long)ad);
+                }
                 return true;
             }
         }
@@ -267,6 +329,8 @@ bool VAAPIEncoder::init(const EncoderConfig& config) {
 
 void VAAPIEncoder::shutdown() {
     m_impl.reset(new Impl());
+    m_dmabuf_pipeline.shutdown();
+    m_dmabuf_active = false;
 }
 
 // Fast BGRA to NV12 conversion - optimized with SSE2
@@ -356,7 +420,7 @@ static void convert_bgra_to_nv12_fast(const uint8_t* bgra, int width, int height
 
 bool VAAPIEncoder::encode(const uint8_t* bgra_data, int width, int height, int stride,
                           uint64_t timestamp_us, EncodedFrame& output) {
-    if (!m_impl->codec_ctx) {
+    if (!m_impl->codec_ctx || !m_impl->sw_frame || !m_impl->hw_frame) {
         return false;
     }
 
@@ -377,23 +441,46 @@ bool VAAPIEncoder::encode(const uint8_t* bgra_data, int width, int height, int s
     }
     m_impl->hw_frame->pts = sw_frame->pts;
 
+    return encode_hw_frame(m_impl->hw_frame, timestamp_us, output);
+}
+
+bool VAAPIEncoder::encode_frame(const CapturedFrame& frame, EncodedFrame& output) {
+    if (!m_dmabuf_active || !frame.is_dmabuf) {
+        return EncoderBackend::encode_frame(frame, output);
+    }
+    if (!m_impl->codec_ctx) return false;
+
+    // Import + GPU colour convert. No CPU touch of pixel data anywhere here.
+    AVFrame* nv12 = static_cast<AVFrame*>(m_dmabuf_pipeline.process(frame));
+    if (!nv12) return false;
+
+    nv12->pts = static_cast<int64_t>(m_frame_count++);
+    return encode_hw_frame(nv12, frame.timestamp_us, output);
+}
+
+bool VAAPIEncoder::encode_hw_frame(void* av_hw_frame, uint64_t timestamp_us,
+                                   EncodedFrame& output) {
+    AVFrame* hw = static_cast<AVFrame*>(av_hw_frame);
+
     // Force keyframe if requested
     if (m_force_keyframe) {
-        m_impl->hw_frame->pict_type = AV_PICTURE_TYPE_I;
-        m_impl->hw_frame->flags |= AV_FRAME_FLAG_KEY;
+        hw->pict_type = AV_PICTURE_TYPE_I;
+        hw->flags |= AV_FRAME_FLAG_KEY;
         LOG_INFO("Forcing keyframe for frame %ld", m_frame_count);
         m_force_keyframe = false;
     } else {
-        m_impl->hw_frame->pict_type = AV_PICTURE_TYPE_NONE;
-        m_impl->hw_frame->flags &= ~AV_FRAME_FLAG_KEY;
+        hw->pict_type = AV_PICTURE_TYPE_NONE;
+        hw->flags &= ~AV_FRAME_FLAG_KEY;
     }
 
     // Send frame to encoder
-    ret = avcodec_send_frame(m_impl->codec_ctx, m_impl->hw_frame);
+    auto t0 = std::chrono::high_resolution_clock::now();
+    int ret = avcodec_send_frame(m_impl->codec_ctx, hw);
     if (ret < 0) {
         LOG_ERROR("Error sending frame to encoder");
         return false;
     }
+    auto t1 = std::chrono::high_resolution_clock::now();
 
     // Receive encoded packet
     ret = avcodec_receive_packet(m_impl->codec_ctx, m_impl->packet);
@@ -410,6 +497,29 @@ bool VAAPIEncoder::encode(const uint8_t* bgra_data, int width, int height, int s
     memcpy(output.data.data(), m_impl->packet->data, m_impl->packet->size);
     output.timestamp_us = timestamp_us;
     output.is_keyframe = (m_impl->packet->flags & AV_PKT_FLAG_KEY) != 0;
+
+    auto t2 = std::chrono::high_resolution_clock::now();
+
+    // Breakdown of the "encode" figure the server reports, so a slow VPP pass
+    // is distinguishable from a slow codec.
+    if (m_dmabuf_active) {
+        static long acc_map = 0, acc_vpp = 0, acc_send = 0, acc_recv = 0;
+        static int n = 0;
+        static auto last_log = std::chrono::high_resolution_clock::now();
+        acc_map  += m_dmabuf_pipeline.last_map_us();
+        acc_vpp  += m_dmabuf_pipeline.last_vpp_us();
+        acc_send += std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+        acc_recv += std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+        n++;
+        if (std::chrono::duration_cast<std::chrono::seconds>(t2 - last_log).count() >= 5 && n > 0) {
+            LOG_INFO("Encode breakdown (avg): import=%.2fms vpp=%.2fms send=%.2fms recv=%.2fms",
+                     acc_map / 1000.0 / n, acc_vpp / 1000.0 / n,
+                     acc_send / 1000.0 / n, acc_recv / 1000.0 / n);
+            acc_map = acc_vpp = acc_send = acc_recv = 0;
+            n = 0;
+            last_log = t2;
+        }
+    }
 
     av_packet_unref(m_impl->packet);
     return true;

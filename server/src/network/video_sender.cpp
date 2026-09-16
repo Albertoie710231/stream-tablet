@@ -2,6 +2,7 @@
 #include "../util/logger.hpp"
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <poll.h>
 #include <unistd.h>
 #include <cstring>
 #include <cstdio>
@@ -41,9 +42,60 @@ bool VideoSender::init(uint16_t port) {
     // Set socket buffer size for better throughput
     int buf_size = 4 * 1024 * 1024;  // 4 MB
     setsockopt(m_socket, SOL_SOCKET, SO_SNDBUF, &buf_size, sizeof(buf_size));
+    // Drain inbound feedback at the same generosity so a slow drain doesn't
+    // back up; before this change rx_queue accumulated forever.
+    setsockopt(m_socket, SOL_SOCKET, SO_RCVBUF, &buf_size, sizeof(buf_size));
+
+    m_feedback_running.store(true, std::memory_order_release);
+    m_feedback_thread = std::thread(&VideoSender::feedback_loop, this);
 
     LOG_INFO("Video sender initialized on port %d", port);
     return true;
+}
+
+void VideoSender::set_keyframe_request_callback(std::function<void()> cb) {
+    std::lock_guard<std::mutex> lk(m_feedback_cb_mutex);
+    m_keyframe_request_cb = std::move(cb);
+}
+
+void VideoSender::feedback_loop() {
+    // Drains the UDP rx_queue and parses feedback packets. Anything that
+    // doesn't match FeedbackPacket is dropped (e.g. the 1-byte client init
+    // punch). poll() lets shutdown() unblock us via m_feedback_running.
+    while (m_feedback_running.load(std::memory_order_acquire)) {
+        struct pollfd pfd{m_socket, POLLIN, 0};
+        int pr = poll(&pfd, 1, 200);  // 200ms tick
+        if (pr <= 0) continue;
+        if (!(pfd.revents & POLLIN)) continue;
+
+        // Drain *all* queued datagrams on this wakeup, not just one — otherwise
+        // bursts of feedback (e.g. NACK floods after a Wi-Fi loss event)
+        // accumulate at ~200 ms/packet and we never catch up.
+        while (true) {
+            uint8_t buf[64];
+            struct sockaddr_in src{};
+            socklen_t slen = sizeof(src);
+            ssize_t n = recvfrom(m_socket, buf, sizeof(buf), MSG_DONTWAIT,
+                                 reinterpret_cast<struct sockaddr*>(&src), &slen);
+            if (n <= 0) break;
+            m_feedback_packets.fetch_add(1, std::memory_order_relaxed);
+
+            if (n < static_cast<ssize_t>(sizeof(FeedbackPacket))) continue;
+            FeedbackPacket fb;
+            memcpy(&fb, buf, sizeof(fb));
+            if (fb.magic != FEEDBACK_MAGIC) continue;
+
+            if (fb.type == FEEDBACK_TYPE_KEYFRAME_REQUEST) {
+                m_keyframe_requests_via_udp.fetch_add(1, std::memory_order_relaxed);
+                std::function<void()> cb;
+                {
+                    std::lock_guard<std::mutex> lk(m_feedback_cb_mutex);
+                    cb = m_keyframe_request_cb;
+                }
+                if (cb) cb();
+            }
+        }
+    }
 }
 
 PacingMode VideoSender::detect_pacing_mode(const std::string& host) {
@@ -178,6 +230,22 @@ bool VideoSender::send_frame(const uint8_t* data, size_t size,
         need_pacing = (size > m_pacing_threshold);
     }
 
+    // Clamp the total pacing cost. The aggressive tiers spread a large
+    // keyframe over hundreds of sleeps — a 645-packet frame at 2 packets per
+    // 300us costs 96ms, which at 120fps is twelve frames we never capture.
+    // Keep the burst structure (that is what protects the client's receive
+    // queue) but compress the delays to fit the budget.
+    if (need_pacing && packets_per_burst > 0 && burst_delay_us > 0) {
+        size_t bursts = num_fragments / static_cast<size_t>(packets_per_burst);
+        long total_us = static_cast<long>(bursts) * burst_delay_us;
+        if (bursts > 0 && total_us > m_max_pacing_us) {
+            int scaled = static_cast<int>(m_max_pacing_us / static_cast<long>(bursts));
+            LOG_DEBUG("Pacing clamped: %zu bursts x %dus = %ldus -> %dus/burst",
+                      bursts, burst_delay_us, total_us, scaled);
+            burst_delay_us = scaled;
+        }
+    }
+
     // Send each fragment (with pacing based on mode)
     size_t offset = 0;
     int packets_in_burst = 0;
@@ -240,6 +308,10 @@ bool VideoSender::send_packet(const uint8_t* data, size_t size) {
 }
 
 void VideoSender::shutdown() {
+    m_feedback_running.store(false, std::memory_order_release);
+    if (m_feedback_thread.joinable()) {
+        m_feedback_thread.join();
+    }
     if (m_socket >= 0) {
         close(m_socket);
         m_socket = -1;

@@ -14,6 +14,7 @@ endif()
 option(ENABLE_TESTS "Build tests" OFF)
 option(ENABLE_X11 "Enable X11 capture backend" ON)
 option(ENABLE_PIPEWIRE "Enable PipeWire capture backend" ON)
+option(ENABLE_CUDA "Enable CUDA/NVENC encoder" ON)
 
 # Find dependencies
 find_package(PkgConfig REQUIRED)
@@ -24,6 +25,7 @@ pkg_check_modules(DRM REQUIRED libdrm)
 pkg_check_modules(UV REQUIRED libuv)
 pkg_check_modules(AVCODEC REQUIRED libavcodec)
 pkg_check_modules(AVUTIL REQUIRED libavutil)
+pkg_check_modules(AVFILTER REQUIRED libavfilter)
 find_package(OpenSSL REQUIRED)
 
 # Optional: X11 capture
@@ -45,8 +47,15 @@ endif()
 if(ENABLE_PIPEWIRE)
     pkg_check_modules(PIPEWIRE libpipewire-0.3)
     pkg_check_modules(GIO gio-2.0 gio-unix-2.0)
-    if(PIPEWIRE_FOUND AND GIO_FOUND)
-        message(STATUS "PipeWire capture: enabled")
+    pkg_check_modules(WAYLAND_CLIENT wayland-client)
+    # Zero-copy DMA-BUF capture needs EGL+GBM to enumerate DRM format modifiers
+    pkg_check_modules(EGL egl)
+    pkg_check_modules(GBM gbm)
+    if(PIPEWIRE_FOUND AND GIO_FOUND AND WAYLAND_CLIENT_FOUND)
+        message(STATUS "PipeWire capture: enabled (with KDE screencast protocol)")
+        set(HAVE_PIPEWIRE TRUE)
+    elseif(PIPEWIRE_FOUND AND GIO_FOUND)
+        message(STATUS "PipeWire capture: enabled (portal only, wayland-client not found)")
         set(HAVE_PIPEWIRE TRUE)
     else()
         message(STATUS "PipeWire capture: disabled (libpipewire or gio not found)")
@@ -90,6 +99,20 @@ endif()
 if(NOT HAVE_X11 AND NOT HAVE_PIPEWIRE)
     message(FATAL_ERROR "At least one capture backend (X11 or PipeWire) is required")
 endif()
+
+# CUDA/NVENC encoder support
+# Note: NVENC support is provided by FFmpeg's libavcodec which links dynamically
+# to NVIDIA drivers. We just need to enable compilation of the CUDA encoder.
+if(ENABLE_CUDA)
+    message(STATUS "CUDA/NVENC encoder: enabled (requires NVIDIA GPU and drivers)")
+    set(HAVE_CUDA TRUE)
+else()
+    message(STATUS "CUDA/NVENC encoder: disabled")
+    set(HAVE_CUDA FALSE)
+endif()
+
+# VAAPI is always enabled (core dependency)
+set(HAVE_VAAPI TRUE)
 
 # Add server subdirectory
 add_subdirectory(server)

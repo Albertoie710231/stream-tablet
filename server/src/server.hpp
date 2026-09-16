@@ -5,8 +5,9 @@
 #include <mutex>
 #include "stream_tablet/config.hpp"
 #include "capture/capture_backend.hpp"
-#include "encoder/vaapi_encoder.hpp"
+#include "encoder/encoder_backend.hpp"
 #include "network/control_server.hpp"
+#include "network/mdns_publisher.hpp"
 #include "network/video_sender.hpp"
 #include "network/input_receiver.hpp"
 #include "input/uinput_backend.hpp"
@@ -14,6 +15,7 @@
 
 #ifdef HAVE_OPUS
 #include "audio/audio_backend.hpp"
+#include "audio/audio_router.hpp"
 #include "audio/opus_encoder.hpp"
 #include "network/audio_sender.hpp"
 #endif
@@ -46,7 +48,11 @@ public:
 
 private:
     bool create_capture_backend(const char* display);
-    void capture_and_encode_loop();
+    bool init_encoder_from_client(const ClientInfo& client);
+    bool capture_and_encode_loop();  // returns true if a frame was captured+encoded
+    // Drops capture back to CPU buffers and rebuilds the encoder. Used both at
+    // init and when the zero-copy path fails at run time.
+    bool fall_back_to_cpu_capture();
     void handle_input(const InputEvent& event);
 
 #ifdef HAVE_OPUS
@@ -58,8 +64,9 @@ private:
     CaptureBackendType m_backend_type = CaptureBackendType::AUTO;
 
     std::unique_ptr<CaptureBackend> m_capture;
-    std::unique_ptr<VAAPIEncoder> m_encoder;
+    std::unique_ptr<EncoderBackend> m_encoder;
     std::unique_ptr<ControlServer> m_control;
+    MdnsPublisher m_mdns;
     std::unique_ptr<VideoSender> m_video_sender;
     std::unique_ptr<InputReceiver> m_input_receiver;
     std::unique_ptr<UInputBackend> m_uinput;
@@ -71,6 +78,7 @@ private:
     std::unique_ptr<AudioBackend> m_audio_capture;
     std::unique_ptr<OpusEncoder> m_opus_encoder;
     std::unique_ptr<AudioSender> m_audio_sender;
+    AudioRouter m_audio_router;
     bool m_audio_initialized = false;
     uint32_t m_audio_sequence = 0;
     std::mutex m_audio_mutex;
@@ -78,6 +86,10 @@ private:
 
     std::atomic<bool> m_running{false};
     uint32_t m_frame_count = 0;
+
+    // Kept so the encoder can be rebuilt without redoing the client handshake.
+    EncoderConfig m_encoder_config;
+    uint32_t m_dmabuf_encode_failures = 0;
 };
 
 }  // namespace stream_tablet

@@ -19,6 +19,14 @@ public:
     // Initialize uinput devices (stylus + mouse + touch like Weylus)
     bool init(int screen_width, int screen_height);
 
+    // Update the screen size used to map coordinates into the ABS range.
+    // Call after the capture backend reports a new resolution (e.g. after
+    // kscreen-doctor reconfigures the virtual output).
+    void set_screen_size(int screen_width, int screen_height) {
+        m_screen_width = screen_width;
+        m_screen_height = screen_height;
+    }
+
     // Send stylus event (in_range=false when stylus goes out of proximity)
     void send_stylus(int x, int y, float pressure, float tilt_x, float tilt_y,
                      bool tip_down, bool button1, bool button2, bool eraser,
@@ -26,6 +34,12 @@ public:
 
     // Send touch event with pressure
     void send_touch(int x, int y, int slot, bool down, float pressure = 1.0f);
+
+    // Send keyboard key event
+    void send_key(uint16_t keycode, bool pressed);
+
+    // Send scroll wheel event (direction: positive = up, negative = down)
+    void send_scroll(int direction);
 
     // Release all pressed buttons and tools (call on disconnect/shutdown)
     void reset_all();
@@ -47,14 +61,17 @@ private:
     bool init_stylus_device();
     bool init_mouse_device();
     bool init_touch_device();
+    bool init_keyboard_device();
 
     void destroy_stylus_device();
     void destroy_mouse_device();
     void destroy_touch_device();
+    void destroy_keyboard_device();
 
-    int m_stylus_fd = -1;  // Stylus/pen device
-    int m_mouse_fd = -1;   // Mouse device (for BTN_LEFT/RIGHT/MIDDLE)
-    int m_touch_fd = -1;   // Touch device (for multitouch)
+    int m_stylus_fd = -1;    // Stylus/pen device
+    int m_mouse_fd = -1;     // Mouse device (for BTN_LEFT/RIGHT/MIDDLE)
+    int m_touch_fd = -1;     // Touch device (for multitouch)
+    int m_keyboard_fd = -1;  // Keyboard device
 
     int m_screen_width = 0;
     int m_screen_height = 0;

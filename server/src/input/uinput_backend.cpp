@@ -37,7 +37,14 @@ bool UInputBackend::init(int screen_width, int screen_height) {
         return false;
     }
 
-    LOG_INFO("Created uinput devices: stylus + mouse + touch (Weylus-style)");
+    if (!init_keyboard_device()) {
+        destroy_stylus_device();
+        destroy_mouse_device();
+        destroy_touch_device();
+        return false;
+    }
+
+    LOG_INFO("Created uinput devices: stylus + mouse + touch + keyboard");
     return true;
 }
 
@@ -137,6 +144,11 @@ bool UInputBackend::init_mouse_device() {
     ioctl(m_mouse_fd, UI_SET_KEYBIT, BTN_LEFT);
     ioctl(m_mouse_fd, UI_SET_KEYBIT, BTN_RIGHT);
     ioctl(m_mouse_fd, UI_SET_KEYBIT, BTN_MIDDLE);
+
+    // Relative events for scroll wheel
+    ioctl(m_mouse_fd, UI_SET_EVBIT, EV_REL);
+    ioctl(m_mouse_fd, UI_SET_RELBIT, REL_WHEEL);
+    ioctl(m_mouse_fd, UI_SET_RELBIT, REL_HWHEEL);
 
     // Absolute axes for positioning
     ioctl(m_mouse_fd, UI_SET_EVBIT, EV_ABS);
@@ -280,6 +292,66 @@ void UInputBackend::destroy_touch_device() {
         close(m_touch_fd);
         m_touch_fd = -1;
     }
+}
+
+bool UInputBackend::init_keyboard_device() {
+    m_keyboard_fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
+    if (m_keyboard_fd < 0) {
+        LOG_ERROR("Failed to open /dev/uinput for keyboard device");
+        return false;
+    }
+
+    // Enable synchronization
+    ioctl(m_keyboard_fd, UI_SET_EVBIT, EV_SYN);
+
+    // Enable key events
+    ioctl(m_keyboard_fd, UI_SET_EVBIT, EV_KEY);
+
+    // Register all standard keys (0-255 covers most common keys)
+    for (int i = 0; i < 256; i++) {
+        ioctl(m_keyboard_fd, UI_SET_KEYBIT, i);
+    }
+
+    // Device setup
+    struct uinput_setup usetup = {};
+    strcpy(usetup.name, "StreamTablet Keyboard");
+    usetup.id.bustype = BUS_VIRTUAL;
+    usetup.id.vendor = 0x1701;
+    usetup.id.product = 0x1704;
+    usetup.id.version = 1;
+
+    if (ioctl(m_keyboard_fd, UI_DEV_SETUP, &usetup) < 0 ||
+        ioctl(m_keyboard_fd, UI_DEV_CREATE) < 0) {
+        LOG_ERROR("Failed to create keyboard device");
+        close(m_keyboard_fd);
+        m_keyboard_fd = -1;
+        return false;
+    }
+
+    usleep(50000);
+    return true;
+}
+
+void UInputBackend::destroy_keyboard_device() {
+    if (m_keyboard_fd >= 0) {
+        ioctl(m_keyboard_fd, UI_DEV_DESTROY);
+        close(m_keyboard_fd);
+        m_keyboard_fd = -1;
+    }
+}
+
+void UInputBackend::send_key(uint16_t keycode, bool pressed) {
+    if (m_keyboard_fd < 0) return;
+
+    emit(m_keyboard_fd, EV_KEY, keycode, pressed ? 1 : 0);
+    emit(m_keyboard_fd, EV_SYN, SYN_REPORT, 0);
+}
+
+void UInputBackend::send_scroll(int direction) {
+    if (m_mouse_fd < 0) return;
+
+    emit(m_mouse_fd, EV_REL, REL_WHEEL, direction);
+    emit(m_mouse_fd, EV_SYN, SYN_REPORT, 0);
 }
 
 void UInputBackend::emit(int fd, int type, int code, int value) {
@@ -482,6 +554,7 @@ void UInputBackend::sync() {
 
 void UInputBackend::shutdown() {
     reset_all();
+    destroy_keyboard_device();
     destroy_touch_device();
     destroy_mouse_device();
     destroy_stylus_device();
